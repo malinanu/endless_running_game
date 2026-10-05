@@ -37,6 +37,12 @@ app.include_router(router)
 BRAND_LOGO = PUBLIC_DIR / "assets" / "brand" / "scan-logo.png"
 
 
+@app.get("/api/health")
+def health():
+    """Liveness check used by the deploy script and monitoring."""
+    return {"status": "ok"}
+
+
 @app.get("/api/brand")
 def brand():
     """Tells the client whether the optional brand logo has been installed."""

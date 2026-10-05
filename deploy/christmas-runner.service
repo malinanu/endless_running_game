@@ -1,0 +1,27 @@
+# systemd unit for Christmas Runner on a CloudPanel server.
+# Replace SITE_USER and DOMAIN, then install as root:
+#   cp deploy/christmas-runner.service /etc/systemd/system/christmas-runner.service
+#   systemctl daemon-reload && systemctl enable --now christmas-runner
+[Unit]
+Description=Christmas Runner (FastAPI)
+After=network.target
+
+[Service]
+Type=simple
+User=SITE_USER
+Group=SITE_USER
+WorkingDirectory=/home/SITE_USER/htdocs/DOMAIN
+EnvironmentFile=/home/SITE_USER/.config/christmas-runner.env
+# One worker: SQLite + a single process is plenty for a test server.
+ExecStart=/home/SITE_USER/htdocs/DOMAIN/.venv/bin/uvicorn app.main:app \
+    --host 127.0.0.1 --port ${PORT} --workers 1 \
+    --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=always
+RestartSec=3
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
