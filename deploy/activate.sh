@@ -44,10 +44,33 @@ else
   echo "none (upload scan-logo.png to $SHARED/brand/ to use one)"
 fi
 
+log "Cache-busting"
+# CloudPanel serves .js/.css with "expires max", so give each release its own URLs.
+VERSION="$(basename "$RELEASE")"
+sed -i -e "s#/css/style.css\"#/css/style.css?v=$VERSION\"#" -e "s#/js/game.js\"#/js/game.js?v=$VERSION\"#" "$RELEASE/public/index.html"
+sed -i -E "s#(from '\./[A-Za-z0-9_-]+\.js)'#\1?v=$VERSION'#g" "$RELEASE"/public/js/*.js
+echo "assets versioned as ?v=$VERSION"
+
 log "Switching to $(basename "$RELEASE")"
 PREVIOUS="$(readlink "$APP_DIR/current" 2>/dev/null || true)"
 ln -sfn "releases/$(basename "$RELEASE")" "$APP_DIR/current.new"
 mv -Tf "$APP_DIR/current.new" "$APP_DIR/current"
+
+log "Linking static files into the site root"
+# CloudPanel's vhost serves *.css, *.js, *.png … straight from the site root
+# (htdocs/DOMAIN) instead of passing them to the app, so expose public/ there.
+# The links go through `current`, so they always follow the live release.
+for entry in "$RELEASE"/public/*; do
+  name="$(basename "$entry")"
+  [[ "$name" == index.html ]] && continue   # the page itself comes from the app
+  link="$APP_DIR/$name"
+  if [[ -e "$link" && ! -L "$link" ]]; then
+    echo "skipped $name: a real file or folder with that name already exists in $APP_DIR"
+    continue
+  fi
+  ln -sfn "current/public/$name" "$link"
+done
+echo "linked: $(find "$APP_DIR" -maxdepth 1 -type l ! -name current -printf '%f ')"
 
 if bash "$RELEASE/deploy/run.sh" restart; then
   log "Cleaning up old releases (keeping $KEEP)"

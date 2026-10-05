@@ -115,11 +115,12 @@ a crash. When everything is fine it does nothing.
 ### 9. Open it on your phone
 Visit `https://DOMAIN`. On the phone you can use **Add to Home Screen** for a full-screen, app-like game.
 
-### Optional: faster loading on phones
+### Optional: compress the 3D models
 Open the site → **Vhost**. Paste the blocks from [`deploy/nginx-static.conf`](deploy/nginx-static.conf)
 inside the `server { … }` block that has `listen 443`, **above** the existing `location / {` block.
 Replace `SITE_USER` and `DOMAIN`, then **Save**. Nginx then serves the 3D models and textures
-directly, compressed and cached.
+directly, compressed and cached. CloudPanel already serves images, CSS and JS itself; this adds
+gzip for the `.gltf`/`.bin` model files.
 
 ### Optional: your logo on the cap
 Open the site → **File Manager** → go to `htdocs/DOMAIN/shared/brand/` → **Upload** your logo named
@@ -143,6 +144,7 @@ re-run the last deploy in GitHub Actions.
 
 ```
 htdocs/DOMAIN/
+├── css, js, vendor, assets, icons  links to current/public/… (see below)
 ├── current -> releases/<version>   the version being served
 ├── releases/                       the last 3 versions (older ones are removed)
 └── shared/                         kept across deploys
@@ -162,6 +164,10 @@ htdocs/DOMAIN/
 - **`deploy/activate.sh`** prepares Python, installs packages and copies your logo into the release.
   It switches `current` and restarts the game. If the game doesn't answer within 20 seconds, it
   switches back to the previous version and the workflow fails.
+- CloudPanel's Nginx serves files ending in `.css`, `.js`, `.png` and similar straight from
+  `htdocs/DOMAIN/`, with long browser caching, instead of passing them to the game server. So each
+  deploy links the game's static folders there, and adds `?v=<version>` to the CSS/JS URLs so phones
+  pick up new code right after a deploy.
 - **`deploy/run.sh`** starts, stops and checks the game (`start`, `stop`, `restart`, `ensure`, `status`).
   It runs as the site user. No root, sudo or systemd is needed.
 
@@ -180,4 +186,5 @@ htdocs/DOMAIN/
 | **Check the public site** fails but **Activate** passed | DNS or SSL isn't ready yet, or the App Port mismatch above. |
 | Signed out right after signing in | You're on `http://` while `COOKIE_SECURE` is on. Use `https://`, or set the variable `COOKIE_SECURE=0` for testing. |
 | Everyone signed out after each deploy | `SECRET_KEY` secret is missing. Add it and re-deploy. |
+| Page shows plain black-on-white text ("Score0 Time0:00 …", "Roasting peanuts…") | The CSS/JS files aren't reachable. Re-run the deploy, which creates the `css`, `js`, `vendor`, `assets`, `icons` links in `htdocs/DOMAIN/`. If it still happens, check in **File Manager** that those links exist, and that the site's **Root Directory** in Settings is `htdocs/DOMAIN`. |
 | Game stuck on the loading bar | If you added the Vhost snippet, check its paths point to `…/htdocs/DOMAIN/current/public`. |
