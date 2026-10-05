@@ -11,11 +11,12 @@ import { loadInto } from './leaderboard.js';
 import { Sfx } from './audio.js';
 import { Vfx, loadVfxTextures } from './vfx.js';
 import { Track, makeSkyTexture, shadows } from './world.js';
+import { RoadPlan, bendObject, bendMaterial, offsetAhead } from './curve.js';
 
 // ---------------------------------------------------------------- tuning
 
 const CFG = {
-  baseSpeed: 11,          // world units / second
+  baseSpeed: 12,          // world units / second
   speedStep: 1.05,        // ×5% ...
   speedEvery: 200,        // ... every 200 points
   lanes: [-1.8, 0, 1.8],
@@ -30,7 +31,8 @@ const CFG = {
   halfDepth: 0.3,
   spawnZ: -78,
   despawnZ: 9,
-  peanutValue: 25,
+  peanutValue: 10,
+  snowballSpeed: 7,       // extra closing speed of rolling snowballs
 };
 
 const ASSET = '/assets';
@@ -405,6 +407,30 @@ function buildTemplates(m, tex) {
     },
   };
 
+  // Giant rolling snowball: travels toward the runner faster than the world scrolls.
+  T.snowball = {
+    kind: 'low',
+    rolling: true,
+    make: () => {
+      const g = new THREE.Group();
+      const ball = new THREE.Mesh(new THREE.IcosahedronGeometry(0.88, 2), new THREE.MeshStandardMaterial({ color: 0xf4f8ff, roughness: 0.9, flatShading: true }));
+      ball.position.y = 0.88;
+      // A few sticks and pebbles caught in the snow make the roll readable.
+      const bits = new THREE.MeshStandardMaterial({ color: 0x5a4030, roughness: 0.9 });
+      for (let i = 0; i < 6; i++) {
+        const b = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 0.4), bits);
+        const a = (i / 6) * Math.PI * 2;
+        b.position.set(Math.cos(a) * 0.8, Math.sin(a) * 0.8, rand(-0.4, 0.4));
+        b.rotation.set(rand(0, 3), rand(0, 3), 0);
+        ball.add(b);
+      }
+      g.add(shadows(ball));
+      g.userData.ball = ball;
+      return g;
+    },
+    box: { minX: -0.72, maxX: 0.72, minY: 0, maxY: 1.6, minZ: -0.7, maxZ: 0.7 },
+  };
+
   // Peanut collectible with a soft golden glow.
   const peanutGeo = makePeanutGeometry();
   const peanutMat = new THREE.MeshStandardMaterial({ map: makePeanutTexture(), roughness: 0.75, emissive: 0x5a3208, emissiveIntensity: 0.35 });
@@ -435,7 +461,7 @@ function buildTemplates(m, tex) {
 
 function acquire(type) {
   const pool = world.pools.get(type);
-  const obj = pool.pop() || world.templates[type].make();
+  const obj = pool.pop() || bendObject(world.templates[type].make());
   obj.visible = true;
   scene.add(obj);
   return obj;
@@ -452,7 +478,7 @@ function spawnObstacle(type, x, z) {
   const obj = acquire(type);
   obj.position.set(x, 0, z);
   const t = world.templates[type];
-  world.obstacles.push({ obj, type, kind: t.kind, box: t.box });
+  world.obstacles.push({ obj, type, kind: t.kind, box: t.box, vz: t.rolling ? CFG.snowballSpeed : 0 });
   return t;
 }
 
@@ -471,28 +497,57 @@ function peanutArc(lane, z) {
   for (let i = -2; i <= 2; i++) spawnPeanut(CFG.lanes[lane], 0.8 + 1.7 * Math.cos((i / 2.6) * (Math.PI / 2)), z - i * 1.1);
 }
 
-/** One "row" of content at depth z, always leaving at least one way through. */
-function spawnRow(z) {
+/**
+ * One "row" of content at depth z. `mustFree` lists lanes that were open in the row just
+ * before; at least one of them stays open so back-to-back rows are always survivable.
+ * Returns the lanes left open.
+ */
+function spawnRow(z, mustFree = [0, 1, 2]) {
   const lvl = state.level;
   const r = Math.random();
-  const wideChance = Math.min(0.24, 0.1 + lvl * 0.015);
+  const wideChance = Math.min(0.22, 0.1 + lvl * 0.012);
   if (r < wideChance) {
     const type = Math.random() < 0.5 ? 'fallenLog' : 'garlandArch';
     spawnObstacle(type, 0, z);
     const lane = Math.floor(Math.random() * 3);
     if (type === 'fallenLog') peanutArc(lane, z);
     else peanutLine(lane, z + 1.6, 3);
-    return;
+    return [0, 1, 2];
   }
-  const order = [0, 1, 2].sort(() => Math.random() - 0.5);
-  const blocked = Math.random() < Math.min(0.65, 0.35 + lvl * 0.04) ? 2 : 1;
+  const open = pick(mustFree);
+  const others = [0, 1, 2].filter((l) => l !== open).sort(() => Math.random() - 0.5);
+  const blocked = Math.random() < Math.min(0.75, 0.45 + lvl * 0.04) ? 2 : 1;
   for (let i = 0; i < blocked; i++) {
-    const lane = order[i];
-    const high = Math.random() < Math.min(0.4, 0.22 + lvl * 0.02);
+    const lane = others[i];
+    const high = Math.random() < Math.min(0.42, 0.24 + lvl * 0.02);
     const t = spawnObstacle(high ? 'icicleGate' : pick(LOW_TYPES), CFG.lanes[lane], z);
     if (t.kind === 'low' && Math.random() < 0.3) peanutArc(lane, z);
   }
-  if (Math.random() < 0.7) peanutLine(order[blocked], z + 2, Math.floor(rand(5, 8)));
+  if (Math.random() < 0.7) peanutLine(open, z + 2, Math.floor(rand(5, 8)));
+  return [open, ...others.slice(blocked)];
+}
+
+/** Picks what comes next: a normal row, a quick double row, or a rolling snowball. */
+function spawnNext() {
+  const lvl = state.level;
+  const minGap = Math.max(11, state.speed * 1.0);
+  let gap = rand(minGap, minGap * 1.5);
+  if (lvl >= 2 && Math.random() < Math.min(0.3, 0.08 + lvl * 0.02)) {
+    // Snowball rolls down an open lane; give it room because it closes in faster.
+    const lane = pick(state.lastFree);
+    spawnObstacle('snowball', CFG.lanes[lane], CFG.spawnZ);
+    state.lastFree = [0, 1, 2].filter((l) => l !== lane);
+    gap += (-CFG.spawnZ * CFG.snowballSpeed) / (state.speed + CFG.snowballSpeed); // ground it gains on the world
+  } else {
+    state.lastFree = spawnRow(CFG.spawnZ, state.lastFree);
+    if (lvl >= 1 && Math.random() < Math.min(0.4, 0.12 + lvl * 0.03)) {
+      // Back-to-back row: a quick second decision right after the first.
+      const z2 = CFG.spawnZ - Math.max(7, state.speed * 0.62);
+      state.lastFree = spawnRow(z2, state.lastFree);
+      gap += CFG.spawnZ - z2; // the second row sits this much further away
+    }
+  }
+  state.nextSpawnAt = state.distance + gap;
 }
 
 // ---------------------------------------------------------------- player
@@ -526,6 +581,7 @@ function buildPlayer(m, bodyTex, legsTex, logoTex) {
   model.scale.setScalar(0.66);
   model.rotation.y = Math.PI; // KayKit characters face +Z; the run goes toward −Z
   player.root.add(model);
+  bendObject(model);
   scene.add(player.root);
   player.model = model;
 
@@ -713,6 +769,7 @@ function buildSnowfall() {
     size: 0.13, map: world.tex.circle_05, transparent: true, depthWrite: false, opacity: 0.95, color: 0xffffff,
   }));
   points.frustumCulled = false;
+  bendMaterial(points.material);
   scene.add(points);
   world.snow = { points, pos, vel, count: COUNT };
 }
@@ -733,6 +790,7 @@ function updateSnow(dt, dz, t) {
 // ---------------------------------------------------------------- game state
 
 const sfx = new Sfx();
+const road = new RoadPlan();
 const state = {
   mode: 'loading',  // loading | menu | playing | paused | dying | over
   distance: 0,
@@ -766,8 +824,9 @@ function resetRun() {
   world.peanuts.length = 0;
   world.vfx?.clear();
   world.track?.reset();
+  road.reset();
   Object.assign(state, {
-    distance: 0, bonus: 0, peanuts: 0, score: 0, level: 0, speed: CFG.baseSpeed, nextSpawnAt: 26,
+    distance: 0, bonus: 0, peanuts: 0, score: 0, level: 0, speed: CFG.baseSpeed, nextSpawnAt: 20, lastFree: [0, 1, 2],
     shake: 0, deathTimer: 0, slowmo: 0, fovKick: 0, runTime: 0,
   });
   resetPlayer();
@@ -987,13 +1046,15 @@ function step(rawDt) {
     state.runTime += dt;
 
     // Spawning rows: gaps scale with speed so reaction time stays roughly constant.
-    if (state.distance >= state.nextSpawnAt) {
-      spawnRow(CFG.spawnZ);
-      const minGap = Math.max(13, state.speed * 1.15);
-      state.nextSpawnAt = state.distance + rand(minGap, minGap * 1.6);
-    }
+    if (state.distance >= state.nextSpawnAt) spawnNext();
 
-    for (const e of world.obstacles) e.obj.position.z += dz;
+    for (const e of world.obstacles) {
+      e.obj.position.z += dz + e.vz * dt;
+      if (e.vz) {
+        e.obj.userData.ball.rotation.x -= ((dz + e.vz * dt) / 0.88);
+        if (e.obj.position.z > -45 && Math.random() < 0.5) world.vfx.snowChunk({ x: e.obj.position.x, y: 0, z: e.obj.position.z + 0.6 }, 2.2, true);
+      }
+    }
     for (const c of world.peanuts) {
       c.obj.position.z += dz;
       c.obj.userData.nut.rotation.y += dt * 3.5;
@@ -1017,7 +1078,7 @@ function step(rawDt) {
       }
     }
     for (const e of world.obstacles) {
-      if (overlaps(pb, e, dz)) { gameOver(); break; }
+      if (overlaps(pb, e, dz + e.vz * dt)) { gameOver(); break; }
     }
 
     state.score = Math.floor(state.distance) + state.bonus;
@@ -1044,6 +1105,8 @@ function step(rawDt) {
     if (state.deathTimer <= 0) showGameOver();
   }
 
+  road.difficulty = state.level;
+  const bend = road.update(state.distance);
   world.track.update(dz, state.time);
   updateSnow(dt, dz, state.time);
   world.vfx.ambient(dt, { x: player.x, y: player.y }, state.mode === 'playing' ? state.speed / CFG.baseSpeed : 0);
@@ -1066,7 +1129,13 @@ function step(rawDt) {
   }
   camera.position.x += sx;
   camera.position.y += sy;
-  camera.lookAt(player.x * 0.45, CAM.lookY + player.y * 0.3, CAM.lookZ);
+  // Look along the road: into bends and up / down slopes, banking slightly in turns.
+  const ahead = offsetAhead(-CAM.lookZ);
+  camera.lookAt(player.x * 0.45 + ahead.x * 0.75, CAM.lookY + player.y * 0.3 + ahead.y * 0.7, CAM.lookZ);
+  camera.rotateZ(-bend.kx * 14);
+  // Runner leans into turns and forward up climbs.
+  player.model.rotation.z = THREE.MathUtils.lerp(player.model.rotation.z, -bend.kx * 22, Math.min(1, dt * 4));
+  player.model.rotation.x = THREE.MathUtils.lerp(player.model.rotation.x, -bend.ky * 28, Math.min(1, dt * 4));
   heroGlow.position.set(player.x, 2.4 + player.y, 1.6);
   sun.position.x = -7 + player.x;
   sun.target.position.x = player.x;
@@ -1243,4 +1312,4 @@ async function boot() {
 boot();
 
 // Exposed for automated smoke tests and debugging in the console.
-window.__runner = { state, player, world, startGame, jump, slide, steer, step, CFG };
+window.__runner = { state, player, world, road, startGame, jump, slide, steer, step, CFG };

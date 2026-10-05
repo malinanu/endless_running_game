@@ -3,6 +3,7 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { flipbookSprite } from './vfx.js';
+import { bendObject } from './curve.js';
 
 export const CHUNK_LEN = 24;
 export const TRACK_HALF = 3.2;     // half-width of the runnable path
@@ -347,11 +348,11 @@ function groundStrip(z0, z1, width = 220) {
   const M = mats();
   const len = z0 - z1;
   const g = new THREE.Group();
-  const snow = new THREE.Mesh(new THREE.PlaneGeometry(width, len), M.snow);
+  const snow = new THREE.Mesh(new THREE.PlaneGeometry(width, len, 1, Math.ceil(len / 1.5)), M.snow);
   snow.rotation.x = -Math.PI / 2;
   snow.position.set(0, 0, (z0 + z1) / 2);
   snow.receiveShadow = true;
-  const path = new THREE.Mesh(new THREE.PlaneGeometry(TRACK_HALF * 2 + 0.6, len), M.path);
+  const path = new THREE.Mesh(new THREE.PlaneGeometry(TRACK_HALF * 2 + 0.6, len, 1, Math.ceil(len / 1.5)), M.path);
   path.rotation.x = -Math.PI / 2;
   path.position.set(0, 0.01, (z0 + z1) / 2);
   path.receiveShadow = true;
@@ -424,7 +425,7 @@ function buildBridgeChunk(models, tex) {
   g.add(groundStrip(0, B0));
   g.add(groundStrip(B1, -CHUNK_LEN));
   // Frozen river below.
-  const river = new THREE.Mesh(new THREE.PlaneGeometry(220, B0 - B1), M.ice);
+  const river = new THREE.Mesh(new THREE.PlaneGeometry(220, B0 - B1, 1, 12), M.ice);
   river.rotation.x = -Math.PI / 2;
   river.position.set(0, -1.7, (B0 + B1) / 2);
   river.receiveShadow = true;
@@ -460,7 +461,7 @@ function buildBridgeChunk(models, tex) {
   }
   // Beams under the deck.
   for (const x of [-TRACK_HALF, TRACK_HALF]) {
-    const beam = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.35, B0 - B1 + 1), MAT.trunk);
+    const beam = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.35, B0 - B1 + 1, 1, 1, 12), MAT.trunk);
     beam.position.set(x, -0.35, (B0 + B1) / 2);
     g.add(beam);
   }
@@ -544,9 +545,9 @@ function buildPlazaChunk(models, tex) {
       g.add(l);
     }
     // Low stone walls with snow on top.
-    const wall = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.9, 10), M.rock);
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.9, 10, 1, 1, 7), M.rock);
     wall.position.set(side * (TRACK_HALF + 3.5), 0.45, -CHUNK_LEN / 2);
-    const wallSnow = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.2, 10.2), M.snowCap);
+    const wallSnow = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.2, 10.2, 1, 1, 7), M.snowCap);
     wallSnow.position.set(side * (TRACK_HALF + 3.5), 0.98, -CHUNK_LEN / 2);
     g.add(shadows(wall), wallSnow);
   }
@@ -570,6 +571,7 @@ export class Track {
       for (let i = 0; i < n; i++) {
         const c = builders[type](models, tex);
         c.visible = false;
+        bendObject(c);
         scene.add(c);
         this.pool[type].push(c);
       }

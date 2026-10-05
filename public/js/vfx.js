@@ -1,6 +1,7 @@
 // GPU-instanced billboard particles with flipbook support, plus the game's effect presets.
 // Textures are from the Brackeys VFX bundle (CC0), see /assets/licenses.
 import * as THREE from 'three';
+import { CURVE_GLSL, curveUniforms } from './curve.js';
 
 const VERT = /* glsl */ `
   attribute vec3 iOffset;
@@ -9,8 +10,10 @@ const VERT = /* glsl */ `
   uniform vec2 grid;
   varying vec2 vUv;
   varying vec4 vColor;
+  ${CURVE_GLSL}
   void main() {
-    vec4 mv = modelViewMatrix * vec4(iOffset, 1.0);
+    vec3 wp = iOffset + curveOffset(iOffset.z);
+    vec4 mv = modelViewMatrix * vec4(wp, 1.0);
     float c = cos(iData.y), s = sin(iData.y);
     vec2 p = position.xy * vec2(iData.x, iData.x * iData.w);
     mv.xy += vec2(c * p.x - s * p.y, s * p.x + c * p.y);
@@ -61,7 +64,7 @@ export class ParticleSystem {
     const mat = new THREE.ShaderMaterial({
       vertexShader: VERT,
       fragmentShader: FRAG,
-      uniforms: { map: { value: texture }, grid: { value: new THREE.Vector2(cols, rows) }, additive: { value: additive ? 1 : 0 } },
+      uniforms: { map: { value: texture }, grid: { value: new THREE.Vector2(cols, rows) }, additive: { value: additive ? 1 : 0 }, ...curveUniforms },
       transparent: true,
       depthWrite: false,
       depthTest,
@@ -222,9 +225,9 @@ export class Vfx {
     for (let i = 0; i < n; i++) {
       this.sys.puff.spawn({
         pos: V(pos.x + rand(-0.35, 0.35), pos.y + 0.15, pos.z + rand(-0.2, 0.3)),
-        vel: V(rand(-1.4, 1.4), rand(0.4, 1.4), rand(0.5, 1.5)),
-        life: rand(0.45, 0.7), size: rand(0.5, 0.8), sizeEnd: big ? 1.8 : 1.3,
-        color: 0xf2f6ff, alpha: 0.8, alphaEnd: 0, drag: 3, fps: rand(50, 80), frame: rand(0, 20),
+        vel: V(rand(-1.4, 1.4), rand(0.4, 1.4), rand(0.2, 0.8)),
+        life: rand(0.4, 0.6), size: rand(0.4, 0.6), sizeEnd: big ? 1.4 : 1.0,
+        color: 0xf2f6ff, alpha: 0.75, alphaEnd: 0, drag: 3, fps: rand(50, 80), frame: rand(0, 20), scroll: false,
       });
     }
     if (big) {
@@ -232,11 +235,11 @@ export class Vfx {
     }
   }
 
-  snowChunk(pos, power = 2.5) {
+  snowChunk(pos, power = 2.5, scroll = false) {
     this.sys.snow.spawn({
       pos: V(pos.x + rand(-0.3, 0.3), pos.y + 0.1, pos.z + rand(-0.1, 0.3)),
       vel: V(rand(-1, 1) * power * 0.6, rand(0.6, 1) * power, rand(0.2, 1) * power * 0.5),
-      life: rand(0.35, 0.6), size: rand(0.06, 0.14), sizeEnd: 0.03, color: 0xffffff, alpha: 1, alphaEnd: 0.2, gravity: -14,
+      life: rand(0.35, 0.6), size: rand(0.06, 0.14), sizeEnd: 0.03, color: 0xffffff, alpha: 1, alphaEnd: 0.2, gravity: -14, scroll,
     });
   }
 
@@ -246,8 +249,8 @@ export class Vfx {
     for (let i = 0; i < n; i++) this.snowChunk(pos, 2.8);
     if (Math.random() < 30 * dt) {
       this.sys.puff.spawn({
-        pos: V(pos.x + rand(-0.3, 0.3), 0.15, pos.z + 0.3), vel: V(rand(-0.6, 0.6), rand(0.3, 0.8), 2),
-        life: 0.5, size: 0.4, sizeEnd: 1.1, color: 0xf2f6ff, alpha: 0.6, alphaEnd: 0, drag: 2, fps: 60, frame: rand(0, 30),
+        pos: V(pos.x + rand(-0.3, 0.3), 0.15, pos.z + 0.2), vel: V(rand(-0.6, 0.6), rand(0.3, 0.8), 0.8),
+        life: 0.4, size: 0.3, sizeEnd: 0.8, color: 0xf2f6ff, alpha: 0.5, alphaEnd: 0, drag: 2, fps: 60, frame: rand(0, 30), scroll: false,
       });
     }
   }
