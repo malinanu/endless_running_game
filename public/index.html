@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Christmas Runner</title>
+  <meta name="description" content="A festive 3D endless runner: jump the presents, slide under the icicles, top the leaderboard.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Mountains+of+Christmas:wght@700&family=Nunito:wght@500;700;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/style.css">
+  <script type="importmap">
+    { "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/addons/" } }
+  </script>
+</head>
+<body>
+  <div id="game"></div>
+
+  <!-- HUD -->
+  <header class="hud">
+    <div class="hud-stats">
+      <div class="stat"><span class="stat-label">Score</span><span class="stat-value" id="hud-score">0</span></div>
+      <div class="stat"><span class="stat-label">Best</span><span class="stat-value" id="hud-best">0</span></div>
+      <div class="stat"><span class="stat-label">Speed</span><span class="stat-value" id="hud-speed">×1.00</span></div>
+    </div>
+    <div class="hud-actions">
+      <button class="icon-btn" id="mute-btn" type="button" aria-label="Toggle sound" title="Sound (M)">🔔</button>
+      <button class="icon-btn" id="pause-btn" type="button" aria-label="Pause" title="Pause (P)">⏸</button>
+      <div class="user-chip" id="user-chip">
+        <span class="user-avatar" aria-hidden="true">🎅</span>
+        <span class="user-name">Guest</span>
+        <button class="link-btn" id="login-btn" type="button">Sign in</button>
+        <button class="link-btn" id="logout-btn" type="button" hidden>Sign out</button>
+      </div>
+    </div>
+  </header>
+  <div class="level-toast" id="level-toast" aria-live="polite"></div>
+
+  <!-- Loading -->
+  <section class="overlay" id="loading-screen">
+    <div class="card card-narrow">
+      <h1 class="title">Christmas Runner</h1>
+      <p class="muted">Wrapping presents…</p>
+      <div class="progress"><div class="progress-bar" id="load-bar"></div></div>
+    </div>
+  </section>
+
+  <!-- Start menu -->
+  <section class="overlay" id="menu-screen" hidden>
+    <div class="card">
+      <h1 class="title">Christmas Runner</h1>
+      <p class="subtitle">Dash through the snowy village before Christmas morning!</p>
+      <ul class="controls">
+        <li><kbd>Space</kbd> / <kbd>↑</kbd><span>Jump over presents, logs &amp; snowmen</span></li>
+        <li><kbd>↓</kbd><span>Slide under icicle gates</span></li>
+        <li><kbd>P</kbd><span>Pause</span> <kbd>M</kbd><span>Sound</span></li>
+        <li class="touch-only"><span>📱 Tap or swipe up to jump, swipe down to slide</span></li>
+      </ul>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="play-btn" type="button">Play</button>
+        <button class="btn" id="menu-board-btn" type="button">Leaderboard</button>
+      </div>
+      <p class="muted small" id="menu-auth-hint">Sign in to save your scores to the leaderboard.</p>
+    </div>
+  </section>
+
+  <!-- Pause -->
+  <section class="overlay" id="pause-screen" hidden>
+    <div class="card card-narrow">
+      <h2 class="title">Paused</h2>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="resume-btn" type="button">Resume</button>
+        <button class="btn" id="quit-btn" type="button">Quit</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Game over + leaderboard -->
+  <section class="overlay" id="over-screen" hidden>
+    <div class="card card-wide">
+      <h2 class="title" id="over-title">Game Over</h2>
+      <div class="final-score">
+        <div><span class="stat-label">Score</span><strong id="final-score">0</strong></div>
+        <div><span class="stat-label">Personal best</span><strong id="final-best">–</strong></div>
+      </div>
+      <p class="save-status" id="save-status"></p>
+      <h3 class="board-heading">🎄 Top 10 🎄</h3>
+      <ol class="leaderboard" id="over-board"></ol>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="again-btn" type="button">Play again</button>
+        <button class="btn" id="save-login-btn" type="button" hidden>Sign in to save</button>
+      </div>
+      <p class="muted small">Press <kbd>Space</kbd> to run again</p>
+    </div>
+  </section>
+
+  <!-- Standalone leaderboard -->
+  <section class="overlay" id="board-screen" hidden>
+    <div class="card card-wide">
+      <h2 class="title">Leaderboard</h2>
+      <ol class="leaderboard" id="menu-board"></ol>
+      <div class="btn-row"><button class="btn" id="board-close-btn" type="button">Back</button></div>
+    </div>
+  </section>
+
+  <!-- Auth modal -->
+  <div class="modal" id="auth-modal" hidden role="dialog" aria-modal="true" aria-labelledby="auth-title">
+    <form class="card card-narrow" id="auth-form" novalidate>
+      <button class="close-btn" type="button" data-close aria-label="Close">×</button>
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" data-auth-tab="login" class="active">Sign in</button>
+        <button type="button" role="tab" data-auth-tab="register">Register</button>
+      </div>
+      <h2 class="title title-sm" id="auth-title">Welcome back!</h2>
+      <label class="field">Username
+        <input id="auth-username" name="username" autocomplete="username" required minlength="3" maxlength="20" spellcheck="false">
+      </label>
+      <label class="field">Password
+        <input id="auth-password" name="password" type="password" autocomplete="current-password" required minlength="6" maxlength="72">
+      </label>
+      <p class="form-error" id="auth-error" role="alert"></p>
+      <button class="btn btn-primary btn-block" id="auth-submit" type="submit">Sign in</button>
+    </form>
+  </div>
+
+  <footer class="credits">3D models: KayKit by Kay Lousberg (CC0)</footer>
+
+  <script type="module" src="/js/game.js"></script>
+</body>
+</html>
