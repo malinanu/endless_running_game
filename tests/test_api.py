@@ -91,3 +91,7 @@ def test_brand_logo_optional(client):
 
     expected = "/assets/brand/scan-logo.png" if main.BRAND_LOGO.is_file() else None
     assert client.get("/api/brand").json() == {"logo": expected}
+
+
+def test_health(client):
+    assert client.get("/api/health").json() == {"status": "ok"}

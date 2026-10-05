@@ -21,6 +21,8 @@ SECRET_KEY=change-me uvicorn app.main:app --reload
 
 Run the API tests with `pytest`.
 
+To put it on a CloudPanel server with automatic deploys from GitHub Actions, see [DEPLOYMENT.md](DEPLOYMENT.md).
+
 ## How to play
 
 Built mobile-first (portrait phones); keyboards work too.
