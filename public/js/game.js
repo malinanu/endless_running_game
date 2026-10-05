@@ -1,16 +1,25 @@
-// Christmas Runner — Three.js endless runner using KayKit CC0 models.
+// Christmas Runner — behind-the-runner Three.js endless runner.
+// Models: KayKit (CC0). Effects: Brackeys VFX bundle (CC0).
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { auth, initAuthUI, openAuthModal } from './auth.js';
 import { loadInto } from './leaderboard.js';
 import { Sfx } from './audio.js';
+import { Vfx, loadVfxTextures } from './vfx.js';
+import { Track, makeSkyTexture, shadows } from './world.js';
 
 // ---------------------------------------------------------------- tuning
 
 const CFG = {
-  baseSpeed: 10,          // world units / second
+  baseSpeed: 11,          // world units / second
   speedStep: 1.05,        // ×5% ...
   speedEvery: 200,        // ... every 200 points
+  lanes: [-1.8, 0, 1.8],
+  laneRate: 16,           // how quickly the runner eases into a lane
   gravity: -34,
   jumpVelocity: 12.5,     // apex ≈ 2.3 units, air time ≈ 0.74 s
   fastFall: -60,          // extra gravity when ↓ is pressed mid-air
@@ -18,95 +27,90 @@ const CFG = {
   standHeight: 1.7,
   slideHeight: 0.75,
   halfWidth: 0.32,
-  spawnX: 48,
-  despawnX: -16,
-  coinValue: 25,
+  halfDepth: 0.3,
+  spawnZ: -78,
+  despawnZ: 9,
+  peanutValue: 25,
 };
 
 const ASSET = '/assets';
 const $ = (sel) => document.querySelector(sel);
+const rand = (a, b) => a + Math.random() * (b - a);
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+const params = new URLSearchParams(location.search);
+// Mobile-first: phones are the main target, so they get lighter defaults.
+const IS_TOUCH = window.matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
 
 // ---------------------------------------------------------------- renderer / scene
 
 const container = $('#game');
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+let pixelRatio = Math.min(window.devicePixelRatio, IS_TOUCH ? 1.5 : 2);
+renderer.setPixelRatio(pixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.05;
+renderer.toneMappingExposure = 1.1;
 container.append(renderer.domElement);
 
 const scene = new THREE.Scene();
-const HORIZON = new THREE.Color(0x5a5fa8);
 scene.background = makeSkyTexture();
-scene.fog = new THREE.Fog(HORIZON, 45, 170);
+scene.fog = new THREE.Fog(0xc4cbe0, 26, 105);
 
-const camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.1, 400);
-const CAM_BASE = new THREE.Vector3(4, 3.9, 11);
-const CAM_LOOK = new THREE.Vector3(6.5, 1.5, 0);
-camera.position.copy(CAM_BASE);
-camera.lookAt(CAM_LOOK);
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 300);
+const CAM = { y: 4.4, z: 7.8, lookY: 1.2, lookZ: -10, fov: 60 };
+camera.position.set(0, CAM.y, CAM.z);
+camera.lookAt(0, CAM.lookY, CAM.lookZ);
 
-scene.add(new THREE.HemisphereLight(0xb8ccff, 0xf2f6ff, 1.5));
-const moon = new THREE.DirectionalLight(0xdfe8ff, 2.2);
-moon.position.set(-8, 22, 14);
-moon.target.position.set(6, 0, 0);
-moon.castShadow = true;
-moon.shadow.mapSize.set(2048, 2048);
-Object.assign(moon.shadow.camera, { left: -14, right: 34, top: 14, bottom: -8, near: 1, far: 70 });
-moon.shadow.bias = -0.0005;
-moon.shadow.normalBias = 0.02;
-scene.add(moon, moon.target);
-// Warm lantern glow around the runner.
-const glow = new THREE.PointLight(0xffb36b, 6, 9, 1.6);
-glow.position.set(1, 2.5, 2.5);
-scene.add(glow);
+// Cool fill everywhere, warm golden key light from the far end of the path (back-lit look).
+scene.add(new THREE.HemisphereLight(0xcfdcff, 0xf4f1ee, 1.35));
+const sun = new THREE.DirectionalLight(0xffd59a, 2.6);
+sun.position.set(-7, 14, -26);
+sun.target.position.set(0, 0, -6);
+sun.castShadow = true;
+sun.shadow.mapSize.setScalar(IS_TOUCH ? 1024 : 2048);
+Object.assign(sun.shadow.camera, { left: -14, right: 14, top: 22, bottom: -22, near: 1, far: 70 });
+sun.shadow.bias = -0.0006;
+sun.shadow.normalBias = 0.03;
+scene.add(sun, sun.target);
+const fill = new THREE.DirectionalLight(0xaec4ff, 0.7);
+fill.position.set(4, 8, 12);
+scene.add(fill);
+const heroGlow = new THREE.PointLight(0xffc27a, 5, 7, 1.6);
+heroGlow.position.set(0, 2.4, 1.6);
+scene.add(heroGlow);
 
-function makeSkyTexture() {
-  const c = document.createElement('canvas');
-  c.width = 4; c.height = 512;
-  const g = c.getContext('2d');
-  const grad = g.createLinearGradient(0, 0, 0, 512);
-  grad.addColorStop(0, '#060b24');
-  grad.addColorStop(0.45, '#1a2560');
-  grad.addColorStop(0.75, '#3b3f8a');
-  grad.addColorStop(1, '#5a5fa8');
-  g.fillStyle = grad;
-  g.fillRect(0, 0, 4, 512);
-  const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
-}
+// Post-processing: soft bloom on lights, peanuts and effects.
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.55, 0.55, 0.86);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+let useBloom = !params.has('lowfx');
 
 // ---------------------------------------------------------------- loading
 
 const manager = new THREE.LoadingManager();
 manager.onProgress = (_url, loaded, total) => { $('#load-bar').style.width = `${(loaded / total) * 100}%`; };
 const loader = new GLTFLoader(manager);
+const texLoader = new THREE.TextureLoader(manager);
 
 const MODELS = {
-  knight: 'player/Knight.glb',
+  hero: 'player/Rogue.glb',
   animBasic: 'player/Rig_Medium_MovementBasic.glb',
   animGeneral: 'player/Rig_Medium_General.glb',
   animAdvanced: 'player/Rig_Medium_MovementAdvanced.glb',
   snow: 'environment/snow.gltf',
-  grassSnow: 'environment/grass_with_snow.gltf',
-  dirtSnow: 'environment/dirt_with_snow.gltf',
-  tree: 'environment/tree_with_snow.gltf',
   ice: 'environment/glass.gltf',
-  buildingA: 'environment/building_A.gltf',
-  buildingB: 'environment/building_B.gltf',
-  buildingC: 'environment/building_C.gltf',
-  buildingD: 'environment/building_D.gltf',
-  buildingE: 'environment/building_E.gltf',
-  streetlight: 'environment/streetlight.gltf',
   box: 'obstacles/box_A.gltf',
   logs: 'obstacles/Wood_Log_Stack.gltf',
   coal: 'obstacles/Stone_Chunks_Small.gltf',
-  gold: 'obstacles/Gold_Bar.gltf',
+  plankA: 'obstacles/Wood_Plank_A.gltf',
+  plankB: 'obstacles/Wood_Plank_B.gltf',
+  plankC: 'obstacles/Wood_Plank_C.gltf',
+  logA: 'obstacles/Wood_Log_A.gltf',
 };
 
 async function loadModels() {
@@ -116,15 +120,25 @@ async function loadModels() {
   return Object.fromEntries(entries);
 }
 
-function shadows(obj, cast = true, receive = true) {
-  obj.traverse((o) => { if (o.isMesh) { o.castShadow = cast; o.receiveShadow = receive; } });
-  return obj;
+async function loadHeroTexture(name) {
+  const tex = await texLoader.loadAsync(`${ASSET}/player/${name}`);
+  tex.flipY = false; // glTF UV convention
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
 }
 
-function firstMesh(gltf) {
-  let mesh = null;
-  gltf.scene.traverse((o) => { if (!mesh && o.isMesh) mesh = o; });
-  return mesh;
+/** Optional brand logo supplied by the game owner (not shipped in the repo). */
+async function loadBrandLogo() {
+  try {
+    const { logo: url } = await (await fetch('/api/brand')).json();
+    if (!url) return null;
+    const tex = await new THREE.TextureLoader().loadAsync(url);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    for (const img of document.querySelectorAll('.brand-logo')) { img.src = url; img.hidden = false; }
+    return tex;
+  } catch {
+    return null;
+  }
 }
 
 /** Clone a model and give every mesh its own tinted / replaced material. */
@@ -142,297 +156,18 @@ function tinted(source, { color, map, emissive, emissiveIntensity = 1, roughness
   return obj;
 }
 
-// ---------------------------------------------------------------- world construction
+// ---------------------------------------------------------------- world state
 
 const world = {
-  layers: [],        // parallax layers: { factor, span, items: Object3D[] }
+  track: null,
+  vfx: null,
+  tex: null,
   obstacles: [],     // active obstacles { obj, type, box, kind }
-  coins: [],         // active collectibles
+  peanuts: [],       // active collectibles
   pools: new Map(),  // type -> inactive Object3D[]
   templates: {},     // type -> { make(), box, kind }
+  snow: null,
 };
-
-// Items scroll left at `factor` × run speed and jump ahead by `span` once they pass `minX`.
-function addLayer(factor, span, items, minX = -span / 2) {
-  const layer = { factor, span, items, minX };
-  world.layers.push(layer);
-  return layer;
-}
-
-function scrollLayers(dx) {
-  for (const layer of world.layers) {
-    const shift = dx * layer.factor;
-    for (const item of layer.items) {
-      item.position.x -= shift;
-      if (item.position.x < layer.minX) {
-        item.position.x += layer.span;
-        if (item.userData.recycle) item.userData.recycle(item);
-      }
-    }
-    if (layer.onScroll) layer.onScroll(shift);
-  }
-}
-
-const rand = (a, b) => a + Math.random() * (b - a);
-const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
-
-function buildGround(m) {
-  // Ground is 1×1×1 blocks (KayKit blocks are 2 units, scaled 0.5) in instanced segments.
-  const SEG = 8;
-  const SEGMENTS = 10;
-  const blocks = {
-    snow: firstMesh(m.snow), grass: firstMesh(m.grassSnow), dirt: firstMesh(m.dirtSnow),
-  };
-  const segments = [];
-  const tmp = new THREE.Object3D();
-  for (let s = 0; s < SEGMENTS; s++) {
-    const seg = new THREE.Group();
-    const cells = { snow: [], grass: [], dirt: [] };
-    for (let i = 0; i < SEG; i++) {
-      for (let z = -3; z <= 3; z++) {
-        const type = Math.abs(z) <= 1 ? 'snow' : (Math.random() < 0.35 ? 'snow' : 'grass');
-        cells[type].push([i, -0.5, z]);
-      }
-      // Front face depth so the strip does not look paper-thin.
-      cells.dirt.push([i, -1.5, 3], [i, -2.5, 3]);
-    }
-    for (const [type, list] of Object.entries(cells)) {
-      const src = blocks[type];
-      const inst = new THREE.InstancedMesh(src.geometry, src.material, list.length);
-      list.forEach(([x, y, z], k) => {
-        tmp.position.set(x, y, z);
-        tmp.scale.setScalar(0.5);
-        tmp.updateMatrix();
-        inst.setMatrixAt(k, tmp.matrix);
-      });
-      inst.receiveShadow = true;
-      inst.frustumCulled = false;
-      seg.add(inst);
-    }
-    seg.position.x = -20 + s * SEG;
-    scene.add(seg);
-    segments.push(seg);
-  }
-  addLayer(1.0, SEG * SEGMENTS, segments, -20 - SEG);
-
-  // Endless snow field behind/around the track (untextured, so it never needs to scroll).
-  const field = new THREE.Mesh(
-    new THREE.PlaneGeometry(600, 300),
-    new THREE.MeshStandardMaterial({ color: 0xe9f1ff, roughness: 0.95 }),
-  );
-  field.rotation.x = -Math.PI / 2;
-  field.position.set(0, -0.02, -150);
-  field.receiveShadow = true;
-  scene.add(field);
-  const front = field.clone();
-  front.position.set(0, -3, 150);
-  scene.add(front);
-}
-
-function makePine() {
-  // Low-poly pine: stacked cones with snow caps, sitting on the KayKit trunk colour.
-  const g = new THREE.Group();
-  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.24, 0.8, 6), PINE_MATS.trunk);
-  trunk.position.y = 0.4;
-  g.add(trunk);
-  const tiers = 3 + Math.floor(Math.random() * 2);
-  for (let i = 0; i < tiers; i++) {
-    const r = 1.25 - i * 0.26;
-    const y = 0.7 + i * 0.75;
-    const cone = new THREE.Mesh(new THREE.ConeGeometry(r, 1.3, 7), PINE_MATS.leaf);
-    cone.position.y = y + 0.65;
-    cone.rotation.y = i * 0.6;
-    const cap = new THREE.Mesh(new THREE.ConeGeometry(r * 0.62, 0.52, 7), PINE_MATS.snow);
-    cap.position.y = y + 1.04;
-    cap.rotation.y = i * 0.6;
-    g.add(cone, cap);
-  }
-  return shadows(g, true, false);
-}
-
-const PINE_MATS = {
-  trunk: new THREE.MeshStandardMaterial({ color: 0x6b4226, roughness: 0.9, flatShading: true }),
-  leaf: new THREE.MeshStandardMaterial({ color: 0x1e6b45, roughness: 0.85, flatShading: true }),
-  snow: new THREE.MeshStandardMaterial({ color: 0xf4f8ff, roughness: 0.9, flatShading: true }),
-};
-
-function buildMidLayer(m) {
-  // Snowy pines (plus the odd KayKit snow-block tree) at 0.5× speed.
-  const SPAN = 80;
-  const items = [];
-  const place = (tree) => {
-    tree.scale.setScalar(rand(0.8, 1.5) * (tree.userData.blocky ? 0.6 : 1));
-    tree.position.z = rand(-16, -5.5);
-    tree.rotation.y = rand(0, Math.PI * 2);
-  };
-  for (let i = 0; i < 26; i++) {
-    let tree;
-    if (i % 6 === 5) {
-      // KayKit block tree, lifted because the block model is centred on its origin.
-      const block = shadows(m.tree.scene.clone(true), true, false);
-      block.position.y = 1;
-      tree = new THREE.Group().add(block);
-      tree.userData.blocky = true;
-    } else {
-      tree = makePine();
-    }
-    place(tree);
-    tree.position.x = -SPAN / 2 + 8 + (i / 26) * SPAN + rand(-1.5, 1.5);
-    tree.userData.recycle = place;
-    scene.add(tree);
-    items.push(tree);
-  }
-  // Streetlights along the back edge of the track.
-  for (let i = 0; i < 6; i++) {
-    const lamp = m.streetlight.scene.clone(true);
-    lamp.scale.setScalar(2.4);
-    lamp.position.set(-SPAN / 2 + 8 + i * (SPAN / 6), 0, -4);
-    lamp.rotation.y = Math.PI / 2;
-    const bulb = new THREE.Mesh(
-      new THREE.SphereGeometry(0.045, 10, 6),
-      new THREE.MeshBasicMaterial({ color: 0xffd28a }),
-    );
-    bulb.position.set(-0.2, 0.9, 0);
-    lamp.add(bulb);
-    shadows(lamp, true, false);
-    scene.add(lamp);
-    items.push(lamp);
-  }
-  addLayer(0.5, SPAN, items, -34);
-}
-
-function buildFarLayer(m) {
-  // Village, mountains and aurora at 0.2× speed.
-  const SPAN = 140;
-  const items = [];
-  const buildings = ['buildingA', 'buildingB', 'buildingC', 'buildingD', 'buildingE'].map((k) => m[k].scene);
-  const roofSnow = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9 });
-  const placeHouse = (house) => {
-    house.position.z = rand(-38, -26);
-    house.rotation.y = pick([0, Math.PI / 2, -Math.PI / 2]) + rand(-0.15, 0.15);
-  };
-  for (let i = 0; i < 16; i++) {
-    const house = new THREE.Group();
-    const body = pick(buildings).clone(true);
-    body.scale.setScalar(rand(2.4, 3.2));
-    house.add(body);
-    const box = new THREE.Box3().setFromObject(body);
-    const cap = new THREE.Mesh(new THREE.BoxGeometry(box.max.x - box.min.x + 0.2, 0.25, box.max.z - box.min.z + 0.2), roofSnow);
-    cap.position.y = box.max.y + 0.1;
-    house.add(cap);
-    // Warm window glow.
-    const win = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 0.5), new THREE.MeshBasicMaterial({ color: 0xffc66b }));
-    win.position.set(rand(-0.4, 0.4), box.max.y * 0.45, box.max.z + 0.02);
-    house.add(win);
-    placeHouse(house);
-    house.position.x = -SPAN / 2 + (i / 16) * SPAN + rand(-2, 2);
-    house.userData.recycle = placeHouse;
-    scene.add(house);
-    items.push(house);
-  }
-
-  const mountainMat = new THREE.MeshStandardMaterial({ color: 0xdfe8ff, roughness: 1, flatShading: true });
-  const capMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, flatShading: true });
-  const MSPAN = 320;
-  const mountains = [];
-  for (let i = 0; i < 12; i++) {
-    const h = rand(22, 46);
-    const r = rand(20, 34);
-    const mtn = new THREE.Group();
-    const base = new THREE.Mesh(new THREE.ConeGeometry(r, h, 7, 1), mountainMat);
-    base.position.y = h / 2;
-    const cap = new THREE.Mesh(new THREE.ConeGeometry(r * 0.32, h * 0.32, 7, 1), capMat);
-    cap.position.y = h - h * 0.16 + 0.05;
-    mtn.add(base, cap);
-    mtn.position.set(-MSPAN / 2 + (i / 12) * MSPAN + rand(-8, 8), -1, rand(-130, -95));
-    mtn.rotation.y = rand(0, Math.PI);
-    scene.add(mtn);
-    mountains.push(mtn);
-  }
-  addLayer(0.2, SPAN, items, -72);
-  addLayer(0.2, MSPAN, mountains, -165);
-
-  // Aurora: additive ribbon whose texture scrolls with the far layer.
-  const aurora = new THREE.Mesh(
-    new THREE.PlaneGeometry(420, 70),
-    new THREE.MeshBasicMaterial({ map: makeAuroraTexture(), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false }),
-  );
-  aurora.position.set(20, 62, -170);
-  scene.add(aurora);
-  const auroraLayer = addLayer(0.2, 1, []);
-  auroraLayer.onScroll = (shift) => { aurora.material.map.offset.x += shift / 600; };
-  world.aurora = aurora;
-
-  // Stars and moon.
-  const starGeo = new THREE.BufferGeometry();
-  const pts = [];
-  for (let i = 0; i < 700; i++) pts.push(rand(-260, 280), rand(25, 140), rand(-200, -175));
-  starGeo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
-  scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.9, sizeAttenuation: true, fog: false })));
-  const moonDisc = new THREE.Mesh(new THREE.CircleGeometry(7, 32), new THREE.MeshBasicMaterial({ color: 0xfff6dc, fog: false }));
-  moonDisc.position.set(70, 85, -185);
-  scene.add(moonDisc);
-}
-
-function makeAuroraTexture() {
-  const c = document.createElement('canvas');
-  c.width = 512; c.height = 128;
-  const g = c.getContext('2d');
-  for (let x = 0; x < 512; x += 2) {
-    const wave = Math.sin(x / 40) * 0.5 + Math.sin(x / 13 + 1) * 0.25 + 0.5;
-    const top = 20 + wave * 30;
-    const grad = g.createLinearGradient(0, top, 0, 128);
-    const hue = 140 + Math.sin(x / 90) * 40;
-    grad.addColorStop(0, `hsla(${hue + 120}, 80%, 65%, 0)`);
-    grad.addColorStop(0.25, `hsla(${hue}, 90%, 60%, ${0.25 + wave * 0.25})`);
-    grad.addColorStop(1, `hsla(${hue}, 90%, 50%, 0)`);
-    g.fillStyle = grad;
-    g.fillRect(x, top, 2, 128 - top);
-  }
-  const tex = new THREE.CanvasTexture(c);
-  tex.wrapS = THREE.RepeatWrapping;
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
-}
-
-function buildSnowfall() {
-  const COUNT = 1400;
-  const pos = new Float32Array(COUNT * 3);
-  const vel = new Float32Array(COUNT);
-  for (let i = 0; i < COUNT; i++) {
-    pos[i * 3] = rand(-25, 55);
-    pos[i * 3 + 1] = rand(0, 26);
-    pos[i * 3 + 2] = rand(-25, 11);
-    vel[i] = rand(1.2, 3.2);
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  const c = document.createElement('canvas');
-  c.width = c.height = 32;
-  const g = c.getContext('2d');
-  const grad = g.createRadialGradient(16, 16, 0, 16, 16, 16);
-  grad.addColorStop(0, 'rgba(255,255,255,1)');
-  grad.addColorStop(1, 'rgba(255,255,255,0)');
-  g.fillStyle = grad;
-  g.fillRect(0, 0, 32, 32);
-  const points = new THREE.Points(geo, new THREE.PointsMaterial({
-    size: 0.22, map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false, opacity: 0.9,
-  }));
-  scene.add(points);
-  world.snow = { points, pos, vel, count: COUNT };
-}
-
-function updateSnow(dt, worldShift, t) {
-  const { pos, vel, count, points } = world.snow;
-  for (let i = 0; i < count; i++) {
-    const k = i * 3;
-    pos[k + 1] -= vel[i] * dt;
-    pos[k] -= worldShift * 0.35 + Math.sin(t + i) * 0.3 * dt;
-    if (pos[k + 1] < 0) pos[k + 1] += 26;
-    if (pos[k] < -25) pos[k] += 80;
-  }
-  points.geometry.attributes.position.needsUpdate = true;
-}
 
 // ---------------------------------------------------------------- obstacles & collectibles
 
@@ -455,20 +190,65 @@ function makeStripeTexture() {
   return tex;
 }
 
+function makePeanutTexture() {
+  // Ridged, dimpled shell pattern.
+  const c = document.createElement('canvas');
+  c.width = 128; c.height = 256;
+  const g = c.getContext('2d');
+  g.fillStyle = '#dca563';
+  g.fillRect(0, 0, 128, 256);
+  g.strokeStyle = 'rgba(140,90,40,0.55)';
+  g.lineWidth = 3;
+  for (let x = 0; x < 128; x += 16) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, 256); g.stroke(); }
+  g.strokeStyle = 'rgba(150,100,50,0.35)';
+  g.lineWidth = 2;
+  for (let y = 0; y < 256; y += 18) { g.beginPath(); g.moveTo(0, y); g.lineTo(128, y + 6); g.stroke(); }
+  for (let i = 0; i < 160; i++) {
+    g.fillStyle = Math.random() < 0.5 ? 'rgba(255,225,170,0.35)' : 'rgba(120,75,30,0.2)';
+    g.fillRect(Math.random() * 128, Math.random() * 256, 3, 3);
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function makePeanutGeometry() {
+  // Two lobes with a pinched waist, like a peanut in its shell.
+  const pts = [];
+  const lobe = (y, c, r) => Math.sqrt(Math.max(0, r * r - (y - c) * (y - c)));
+  for (let i = 0; i <= 32; i++) {
+    const y = -0.5 + i / 32;
+    const r = Math.max(lobe(y, -0.22, 0.28), lobe(y, 0.24, 0.26), y > -0.45 && y < 0.47 ? 0.17 : 0);
+    pts.push(new THREE.Vector2(Math.max(0.001, r * 0.95), y));
+  }
+  const geo = new THREE.LatheGeometry(pts, 20);
+  geo.computeVertexNormals();
+  return geo;
+}
+
 function hitboxOf(obj, shrink = 0.12) {
   obj.updateMatrixWorld(true);
   const b = new THREE.Box3().setFromObject(obj);
   const sx = (b.max.x - b.min.x) * shrink;
-  return { minX: b.min.x + sx, maxX: b.max.x - sx, minY: Math.max(0, b.min.y), maxY: b.max.y - (b.max.y - b.min.y) * shrink * 0.6 };
+  const sz = (b.max.z - b.min.z) * shrink;
+  return {
+    minX: b.min.x + sx, maxX: b.max.x - sx,
+    minY: Math.max(0, b.min.y), maxY: b.max.y - (b.max.y - b.min.y) * shrink * 0.6,
+    minZ: b.min.z + sz, maxZ: b.max.z - sz,
+  };
 }
 
-function buildTemplates(m) {
+function buildTemplates(m, tex) {
   const T = world.templates;
-  const ribbonMat = new THREE.MeshStandardMaterial({ color: 0xffd34d, metalness: 0.4, roughness: 0.35 });
+  const ribbonMat = new THREE.MeshStandardMaterial({ color: 0xffd34d, metalness: 0.4, roughness: 0.35, emissive: 0x3a2a00 });
+  const stripe = makeStripeTexture();
+  const caneMat = new THREE.MeshStandardMaterial({ map: stripe, roughness: 0.4 });
+  const iceMat = new THREE.MeshStandardMaterial({ color: 0xc8eeff, roughness: 0.1, metalness: 0.1, transparent: true, opacity: 0.88, emissive: 0x3b8fc0, emissiveIntensity: 0.55 });
+  const snowMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9 });
 
-  const makePresent = (color, scale = 5.2) => () => {
+  const makePresent = (color, scale = 5.6) => () => {
     const g = new THREE.Group();
-    const box = tinted(m.box.scene, { map: null, color, roughness: 0.55 });
+    const box = tinted(m.box.scene, { map: null, color, roughness: 0.5 });
     box.scale.setScalar(scale);
     g.add(box);
     const b = new THREE.Box3().setFromObject(box);
@@ -477,24 +257,29 @@ function buildTemplates(m) {
     const r1 = new THREE.Mesh(new THREE.BoxGeometry(w * 1.02, h * 1.02, 0.12), ribbonMat);
     const r2 = new THREE.Mesh(new THREE.BoxGeometry(0.12, h * 1.02, w * 1.02), ribbonMat);
     r1.position.y = r2.position.y = h / 2;
-    const bow = new THREE.Mesh(new THREE.TorusKnotGeometry(0.12, 0.05, 32, 6, 2, 3), ribbonMat);
+    const bow = new THREE.Mesh(new THREE.TorusKnotGeometry(0.13, 0.05, 32, 6, 2, 3), ribbonMat);
     bow.position.y = h + 0.08;
-    g.add(r1, r2, bow);
+    const snowTop = new THREE.Mesh(new THREE.BoxGeometry(w * 0.9, 0.06, w * 0.9), snowMat);
+    snowTop.position.y = h + 0.02;
+    g.add(r1, r2, bow, snowTop);
     return shadows(g);
   };
   const presentColors = { presentRed: 0xc8102e, presentGreen: 0x1f8a4c, presentBlue: 0x2b59c3 };
   for (const [name, color] of Object.entries(presentColors)) T[name] = { make: makePresent(color), kind: 'low' };
 
-  T.presentPair = {
+  T.presentPile = {
     kind: 'low',
     make: () => {
       const g = new THREE.Group();
-      const a = makePresent(0xc8102e)();
-      const b = makePresent(0x1f8a4c, 3.6)();
-      a.position.x = -0.45;
-      b.position.x = 0.55;
+      const a = makePresent(0xc8102e, 4.6)();
+      const b = makePresent(0x1f8a4c, 3.4)();
+      const c = makePresent(0xf2c14e, 3)();
+      a.position.set(-0.25, 0, 0.1);
+      b.position.set(0.42, 0, -0.15);
       b.rotation.y = 0.5;
-      g.add(a, b);
+      c.position.set(0.1, 0, 0.45);
+      c.rotation.y = -0.4;
+      g.add(a, b, c);
       return g;
     },
   };
@@ -503,8 +288,7 @@ function buildTemplates(m) {
     kind: 'low',
     make: () => {
       const o = shadows(m.logs.scene.clone(true));
-      o.scale.setScalar(0.62);
-      o.rotation.y = Math.PI / 2;
+      o.scale.setScalar(0.66);
       return o;
     },
   };
@@ -513,7 +297,7 @@ function buildTemplates(m) {
     kind: 'low',
     make: () => {
       const o = shadows(tinted(m.coal.scene, { color: 0x2a2a30, roughness: 0.6 }));
-      o.scale.setScalar(1.35);
+      o.scale.setScalar(1.3);
       return o;
     },
   };
@@ -522,13 +306,8 @@ function buildTemplates(m) {
     kind: 'low',
     make: () => {
       const g = new THREE.Group();
-      const o = shadows(m.snow.scene.clone(true));
-      o.scale.set(0.75, 0.38, 1.15);
-      o.position.y = 0.38;
-      g.add(o);
-      const top = new THREE.Mesh(new THREE.SphereGeometry(0.75, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2), new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.95 }));
-      top.scale.set(1, 0.45, 1.4);
-      top.position.y = 0.72;
+      const top = new THREE.Mesh(new THREE.SphereGeometry(0.8, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2), snowMat);
+      top.scale.set(0.95, 0.95, 0.75);
       g.add(shadows(top));
       return g;
     },
@@ -538,19 +317,18 @@ function buildTemplates(m) {
     kind: 'low',
     make: () => {
       const g = new THREE.Group();
-      const snowMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9 });
       const dark = new THREE.MeshStandardMaterial({ color: 0x1c1c22, roughness: 0.5 });
       const carrot = new THREE.MeshStandardMaterial({ color: 0xff7a1a, roughness: 0.6 });
       const scarf = new THREE.MeshStandardMaterial({ color: 0xc8102e, roughness: 0.8 });
-      const s1 = new THREE.Mesh(new THREE.IcosahedronGeometry(0.5, 1), snowMat);
+      const s1 = new THREE.Mesh(new THREE.IcosahedronGeometry(0.5, 2), snowMat);
       s1.position.y = 0.45;
-      const s2 = new THREE.Mesh(new THREE.IcosahedronGeometry(0.36, 1), snowMat);
+      const s2 = new THREE.Mesh(new THREE.IcosahedronGeometry(0.36, 2), snowMat);
       s2.position.y = 1.0;
-      const head = new THREE.Mesh(new THREE.IcosahedronGeometry(0.26, 1), snowMat);
+      const head = new THREE.Mesh(new THREE.IcosahedronGeometry(0.26, 2), snowMat);
       head.position.y = 1.42;
       const nose = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.25, 6), carrot);
-      nose.rotation.z = Math.PI / 2;
-      nose.position.set(-0.32, 1.42, 0);
+      nose.rotation.x = Math.PI / 2;
+      nose.position.set(0, 1.42, 0.32);
       const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.04, 12), dark);
       brim.position.y = 1.62;
       const hat = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.19, 0.3, 12), dark);
@@ -558,69 +336,94 @@ function buildTemplates(m) {
       const sc = new THREE.Mesh(new THREE.TorusGeometry(0.27, 0.06, 6, 16), scarf);
       sc.rotation.x = Math.PI / 2;
       sc.position.y = 1.2;
-      const eyes = [-0.08, 0.08].map((z) => {
+      const eyes = [-0.08, 0.08].map((x) => {
         const e = new THREE.Mesh(new THREE.SphereGeometry(0.035, 6, 4), dark);
-        e.position.set(-0.22, 1.5, z);
+        e.position.set(x, 1.5, 0.22);
         return e;
       });
       g.add(s1, s2, head, nose, brim, hat, sc, ...eyes);
       return shadows(g);
     },
-    // Snowman is tall but narrow; the hat can be cleared by a good jump.
-    box: { minX: -0.4, maxX: 0.4, minY: 0, maxY: 1.45 },
+    box: { minX: -0.4, maxX: 0.4, minY: 0, maxY: 1.45, minZ: -0.4, maxZ: 0.4 },
   };
 
-  T.icicleGate = {
-    kind: 'high',
+  // Lane-wide gate: slide under the icicles.
+  const makeGate = (half, bulbs) => () => {
+    const g = new THREE.Group();
+    for (const x of [-half, half]) {
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 3.6, 12), caneMat);
+      post.position.set(x, 1.8, 0);
+      const hook = new THREE.Mesh(new THREE.TorusGeometry(0.25, 0.12, 8, 16, Math.PI), caneMat);
+      hook.position.set(x + (x < 0 ? 0.25 : -0.25), 3.6, 0);
+      g.add(post, hook);
+    }
+    const beam = tinted(m.ice.scene, { color: 0xd5f2ff, transparent: true, opacity: 0.85 });
+    beam.scale.set(half + 0.1, 0.24, 0.32);
+    beam.position.y = 1.86;
+    g.add(beam);
+    const count = Math.round(half * 7);
+    for (let i = 0; i < count; i++) {
+      const len = rand(0.32, 0.62);
+      const ice = new THREE.Mesh(new THREE.ConeGeometry(rand(0.06, 0.11), len, 6), iceMat);
+      ice.rotation.x = Math.PI;
+      ice.position.set(-half + 0.15 + (i / (count - 1)) * (half * 2 - 0.3), 1.62 - len / 2, rand(-0.12, 0.12));
+      g.add(ice);
+    }
+    // Garland with twinkly bulbs across the top.
+    const curve = new THREE.CatmullRomCurve3([new THREE.Vector3(-half, 3.3, 0), new THREE.Vector3(0, 2.85, 0), new THREE.Vector3(half, 3.3, 0)]);
+    const garland = new THREE.Mesh(new THREE.TubeGeometry(curve, 24, 0.11, 6), new THREE.MeshStandardMaterial({ color: 0x1f7a3c, roughness: 0.8 }));
+    g.add(garland);
+    if (bulbs) {
+      const colors = [0xff4d4d, 0xffd24d, 0x4dff88, 0x4dc3ff];
+      for (let i = 0; i <= 8; i++) {
+        const p = curve.getPoint(i / 8);
+        const b = new THREE.Mesh(new THREE.SphereGeometry(0.07, 6, 4), new THREE.MeshBasicMaterial({ color: colors[i % 4] }));
+        b.position.copy(p).add(new THREE.Vector3(0, -0.12, 0.05));
+        g.add(b);
+      }
+    }
+    return shadows(g);
+  };
+  T.icicleGate = { kind: 'high', make: makeGate(0.85, true), box: { minX: -0.85, maxX: 0.85, minY: 1.05, maxY: 50, minZ: -0.3, maxZ: 0.3 } };
+  T.garlandArch = { kind: 'high', wide: true, make: makeGate(3.0, true), box: { minX: -3, maxX: 3, minY: 1.05, maxY: 50, minZ: -0.3, maxZ: 0.3 } };
+
+  // Fallen log across all three lanes: jump it.
+  T.fallenLog = {
+    kind: 'low',
+    wide: true,
     make: () => {
       const g = new THREE.Group();
-      const stripe = makeStripeTexture();
-      const caneMat = new THREE.MeshStandardMaterial({ map: stripe, roughness: 0.4 });
-      const iceMat = new THREE.MeshStandardMaterial({ color: 0xbfe9ff, roughness: 0.15, metalness: 0.1, transparent: true, opacity: 0.85, emissive: 0x2a6f9a, emissiveIntensity: 0.35 });
-      for (const z of [-2.1, 2.1]) {
-        const post = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 4.2, 12), caneMat);
-        post.position.set(0, 2.1, z);
-        g.add(post);
-      }
-      // Ice beam (KayKit glass block) with hanging icicles.
-      const beam = tinted(m.ice.scene, { color: 0xcdeeff, transparent: true, opacity: 0.8 });
-      beam.scale.set(0.42, 0.28, 2.25);
-      beam.position.y = 1.92;
-      g.add(beam);
-      for (let i = 0; i < 11; i++) {
-        const len = rand(0.35, 0.65);
-        const ice = new THREE.Mesh(new THREE.ConeGeometry(rand(0.07, 0.12), len, 6), iceMat);
-        ice.rotation.x = Math.PI;
-        ice.position.set(rand(-0.25, 0.25), 1.64 - len / 2, -1.9 + i * 0.38);
-        g.add(ice);
-      }
-      // Garland and a wreath on top make it read as a gate you must duck under.
-      const top = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 4.4, 10), caneMat);
-      top.rotation.x = Math.PI / 2;
-      top.position.y = 4.15;
-      const wreath = new THREE.Mesh(new THREE.TorusGeometry(0.42, 0.14, 8, 18), new THREE.MeshStandardMaterial({ color: 0x1f7a3c, roughness: 0.7 }));
-      wreath.position.set(-0.05, 3.55, 0);
-      wreath.rotation.y = Math.PI / 2;
-      const berry = new THREE.Mesh(new THREE.SphereGeometry(0.1, 8, 6), new THREE.MeshStandardMaterial({ color: 0xd7263d }));
-      berry.position.set(-0.2, 3.15, 0);
-      g.add(top, wreath, berry);
-      return shadows(g);
+      const log = shadows(m.logA.scene.clone(true));
+      log.rotation.y = Math.PI / 2;
+      log.scale.set(1.25, 1.25, 4.9);
+      log.position.y = 0.35;
+      const snow = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.32, 6.2, 10, 1, false, -Math.PI / 2, Math.PI), snowMat);
+      snow.rotation.z = Math.PI / 2;
+      snow.position.y = 0.76;
+      g.add(log, shadows(snow));
+      return g;
     },
-    // Lethal from the icicle tips upward: you can only get through by sliding.
-    box: { minX: -0.35, maxX: 0.35, minY: 1.05, maxY: 50 },
   };
 
-  T.coin = {
-    kind: 'coin',
+  // Peanut collectible with a soft golden glow.
+  const peanutGeo = makePeanutGeometry();
+  const peanutMat = new THREE.MeshStandardMaterial({ map: makePeanutTexture(), roughness: 0.75, emissive: 0x5a3208, emissiveIntensity: 0.35 });
+  T.peanut = {
+    kind: 'peanut',
     make: () => {
-      const o = tinted(m.gold.scene, { emissive: 0x6b4a00, emissiveIntensity: 0.6 });
-      o.scale.setScalar(1.25);
-      const pivot = new THREE.Group();
-      o.position.y = -0.15;
-      pivot.add(shadows(o, true, false));
-      return pivot;
+      const g = new THREE.Group();
+      const nut = new THREE.Mesh(peanutGeo, peanutMat);
+      nut.scale.setScalar(0.85);
+      nut.rotation.z = 0.25;
+      nut.castShadow = true;
+      g.add(nut);
+      const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex.spotlight_01, color: 0xffb347, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.75 }));
+      glow.scale.set(1.5, 1.5, 1);
+      g.add(glow);
+      g.userData.nut = nut;
+      return g;
     },
-    box: { minX: -0.45, maxX: 0.45, minY: -0.5, maxY: 0.6 },
+    box: { minX: -0.5, maxX: 0.5, minY: -0.55, maxY: 0.55, minZ: -0.45, maxZ: 0.45 },
   };
 
   for (const [type, t] of Object.entries(T)) {
@@ -643,31 +446,53 @@ function release(entry) {
   world.pools.get(entry.type).push(entry.obj);
 }
 
-const LOW_TYPES = ['presentRed', 'presentGreen', 'presentBlue', 'presentPair', 'logs', 'coal', 'drift', 'snowman'];
+const LOW_TYPES = ['presentRed', 'presentGreen', 'presentBlue', 'presentPile', 'logs', 'coal', 'drift', 'snowman'];
 
-function spawnObstacle(x) {
-  // The share of slide obstacles grows a little as the game speeds up.
-  const highChance = Math.min(0.42, 0.25 + state.level * 0.02);
-  const type = Math.random() < highChance ? 'icicleGate' : pick(LOW_TYPES);
+function spawnObstacle(type, x, z) {
   const obj = acquire(type);
-  obj.position.set(x, 0, 0);
-  obj.rotation.y = type === 'icicleGate' ? 0 : rand(-0.25, 0.25);
+  obj.position.set(x, 0, z);
   const t = world.templates[type];
   world.obstacles.push({ obj, type, kind: t.kind, box: t.box });
-
-  // Reward a jump with a gold bar arcing over some low obstacles.
-  if (t.kind === 'low' && Math.random() < 0.35) spawnCoin(x, 2.6);
-  if (t.kind === 'high' && Math.random() < 0.3) spawnCoin(x, 0.45);
+  return t;
 }
 
-function spawnCoin(x, y) {
-  const obj = acquire('coin');
-  obj.position.set(x, y, 0);
-  world.coins.push({ obj, type: 'coin', box: world.templates.coin.box, baseY: y });
+function spawnPeanut(x, y, z) {
+  const obj = acquire('peanut');
+  obj.position.set(x, y, z);
+  world.peanuts.push({ obj, type: 'peanut', box: world.templates.peanut.box, baseY: y });
 }
 
-function spawnCoinRow(x, count) {
-  for (let i = 0; i < count; i++) spawnCoin(x + i * 1.6, 0.7);
+function peanutLine(lane, z, count) {
+  for (let i = 0; i < count; i++) spawnPeanut(CFG.lanes[lane], 0.75, z - i * 1.6);
+}
+
+function peanutArc(lane, z) {
+  // Over a low obstacle: follows the jump curve.
+  for (let i = -2; i <= 2; i++) spawnPeanut(CFG.lanes[lane], 0.8 + 1.7 * Math.cos((i / 2.6) * (Math.PI / 2)), z - i * 1.1);
+}
+
+/** One "row" of content at depth z, always leaving at least one way through. */
+function spawnRow(z) {
+  const lvl = state.level;
+  const r = Math.random();
+  const wideChance = Math.min(0.24, 0.1 + lvl * 0.015);
+  if (r < wideChance) {
+    const type = Math.random() < 0.5 ? 'fallenLog' : 'garlandArch';
+    spawnObstacle(type, 0, z);
+    const lane = Math.floor(Math.random() * 3);
+    if (type === 'fallenLog') peanutArc(lane, z);
+    else peanutLine(lane, z + 1.6, 3);
+    return;
+  }
+  const order = [0, 1, 2].sort(() => Math.random() - 0.5);
+  const blocked = Math.random() < Math.min(0.65, 0.35 + lvl * 0.04) ? 2 : 1;
+  for (let i = 0; i < blocked; i++) {
+    const lane = order[i];
+    const high = Math.random() < Math.min(0.4, 0.22 + lvl * 0.02);
+    const t = spawnObstacle(high ? 'icicleGate' : pick(LOW_TYPES), CFG.lanes[lane], z);
+    if (t.kind === 'low' && Math.random() < 0.3) peanutArc(lane, z);
+  }
+  if (Math.random() < 0.7) peanutLine(order[blocked], z + 2, Math.floor(rand(5, 8)));
 }
 
 // ---------------------------------------------------------------- player
@@ -678,6 +503,8 @@ const player = {
   mixer: null,
   actions: {},
   current: null,
+  lane: 1,
+  x: 0,
   y: 0,
   vy: 0,
   onGround: true,
@@ -685,11 +512,19 @@ const player = {
   wantFastFall: false,
 };
 
-function buildPlayer(m) {
-  const model = m.knight.scene;
+function buildPlayer(m, bodyTex, legsTex, logoTex) {
+  const model = m.hero.scene;
+  // Recolour: red sweater with mustard trim, green trousers (pre-baked palette swaps).
+  model.traverse((o) => {
+    if (!o.isMesh) return;
+    if (o.name.includes('Cape')) { o.visible = false; return; }
+    if (/Body|Arm/.test(o.name)) { o.material = o.material.clone(); o.material.map = bodyTex; }
+    else if (/Leg/.test(o.name)) { o.material = o.material.clone(); o.material.map = legsTex; }
+  });
   shadows(model, true, false);
-  model.scale.setScalar(0.68);
-  model.rotation.y = Math.PI / 2; // KayKit characters face +Z; the run goes toward +X
+  addCap(model, logoTex);
+  model.scale.setScalar(0.66);
+  model.rotation.y = Math.PI; // KayKit characters face +Z; the run goes toward −Z
   player.root.add(model);
   scene.add(player.root);
   player.model = model;
@@ -710,7 +545,7 @@ function buildPlayer(m) {
   };
   player.actions = {
     idle: make('Idle_A'),
-    run: make('Running_A', { speed: 1.1 }),
+    run: make('Running_A', { speed: 1.15 }),
     jumpStart: make('Jump_Start', { once: true, speed: 2.4 }),
     jumpAir: make('Jump_Idle'),
     slide: make('Crawling', { speed: 1.4 }),
@@ -719,6 +554,49 @@ function buildPlayer(m) {
   mixer.addEventListener('finished', (e) => {
     if (e.action === player.actions.jumpStart && !player.onGround) playAction('jumpAir', 0.1);
   });
+}
+
+/** Blue baseball cap on the head bone, with the brand logo on the back when supplied. */
+function addCap(model, logoTex) {
+  const head = model.getObjectByName('head');
+  let headMesh = null;
+  model.traverse((o) => { if (!headMesh && o.isMesh && /_Head$/.test(o.name)) headMesh = o; });
+  if (!head || !headMesh) return;
+  model.updateMatrixWorld(true);
+  headMesh.geometry.computeBoundingBox();
+  const box = headMesh.geometry.boundingBox.clone().applyMatrix4(headMesh.matrixWorld);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const w = Math.max(size.x, size.z);
+
+  const capMat = new THREE.MeshStandardMaterial({ color: 0x1d4f8f, roughness: 0.55 });
+  const cap = new THREE.Group();
+  const dome = new THREE.Mesh(new THREE.SphereGeometry(w * 0.47, 24, 14, 0, Math.PI * 2, 0, Math.PI / 2), capMat);
+  dome.scale.set(1.04, 0.82, 1.1);
+  const band = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.49, w * 0.49, w * 0.08, 24, 1, true), capMat);
+  band.position.y = w * 0.02;
+  const brim = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.4, w * 0.4, w * 0.04, 24, 1, false, -Math.PI / 2, Math.PI), new THREE.MeshStandardMaterial({ color: 0x173f73, roughness: 0.6 }));
+  brim.scale.set(1.15, 1, 1.3);
+  brim.position.set(0, 0, w * 0.45);
+  const button = new THREE.Mesh(new THREE.SphereGeometry(w * 0.05, 8, 6), capMat);
+  button.position.y = w * 0.39;
+  cap.add(dome, band, brim, button);
+  if (logoTex) {
+    const aspect = logoTex.image ? logoTex.image.width / logoTex.image.height : 1.6;
+    const lw = w * 0.5;
+    const logo = new THREE.Mesh(
+      new THREE.PlaneGeometry(lw, lw / aspect),
+      new THREE.MeshStandardMaterial({ map: logoTex, transparent: true, roughness: 0.5, polygonOffset: true, polygonOffsetFactor: -1 }),
+    );
+    // On the back of the cap, facing the camera, tilted to follow the dome.
+    logo.position.set(0, w * 0.17, -w * 0.47);
+    logo.rotation.set(0.35, Math.PI, 0);
+    cap.add(logo);
+  }
+  cap.position.set(center.x, box.max.y - size.y * 0.36, center.z + size.z * 0.02);
+  cap.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+  model.add(cap);
+  head.attach(cap);
 }
 
 function playAction(name, fade = 0.15) {
@@ -730,24 +608,23 @@ function playAction(name, fade = 0.15) {
 }
 
 function resetPlayer() {
-  player.y = 0;
-  player.vy = 0;
-  player.onGround = true;
-  player.slideTimer = 0;
-  player.wantFastFall = false;
+  Object.assign(player, { lane: 1, x: 0, y: 0, vy: 0, onGround: true, slideTimer: 0, wantFastFall: false });
   player.root.position.set(0, 0, 0);
-  player.model.position.set(0, 0, 0);
-  player.model.rotation.set(0, Math.PI / 2, 0);
+  player.root.rotation.set(0, 0, 0);
+}
+
+function feet() {
+  return { x: player.x, y: player.y, z: 0.1 };
 }
 
 function jump() {
-  if (state.mode !== 'playing') return;
-  if (!player.onGround) return;
+  if (state.mode !== 'playing' || !player.onGround) return;
   player.slideTimer = 0;
   player.vy = CFG.jumpVelocity;
   player.onGround = false;
   playAction('jumpStart', 0.05);
   sfx.jump();
+  world.vfx.puff(feet());
 }
 
 function slide() {
@@ -758,52 +635,109 @@ function slide() {
   playAction('slide', 0.08);
 }
 
+function steer(dir) {
+  if (state.mode !== 'playing') return;
+  const lane = Math.max(0, Math.min(2, player.lane + dir));
+  if (lane === player.lane) return;
+  player.lane = lane;
+  world.vfx.laneStreak({ x: player.x, y: player.y, z: 0 }, dir);
+}
+
+function land() {
+  player.y = 0;
+  player.vy = 0;
+  player.onGround = true;
+  world.vfx.puff(feet(), true);
+  if (player.wantFastFall) {
+    player.wantFastFall = false;
+    player.slideTimer = CFG.slideTime;
+    sfx.slide();
+    playAction('slide', 0.08);
+  } else {
+    playAction('run', 0.12);
+  }
+}
+
 function updatePlayer(dt) {
+  const targetX = CFG.lanes[player.lane];
+  player.x += (targetX - player.x) * Math.min(1, dt * CFG.laneRate);
   if (!player.onGround) {
     const g = CFG.gravity + (player.wantFastFall ? CFG.fastFall : 0);
     player.vy += g * dt;
     player.y += player.vy * dt;
-    if (player.y <= 0) {
-      player.y = 0;
-      player.vy = 0;
-      player.onGround = true;
-      if (player.wantFastFall) {
-        player.wantFastFall = false;
-        player.slideTimer = CFG.slideTime;
-        sfx.slide();
-        playAction('slide', 0.08);
-      } else {
-        playAction('run', 0.12);
-      }
-    }
+    if (player.y <= 0) land();
   } else if (player.slideTimer > 0) {
     player.slideTimer -= dt;
+    world.vfx.slideSpray(feet(), dt);
     if (player.slideTimer <= 0) playAction('run', 0.15);
   }
-  player.root.position.y = player.y;
-  // Lean forward while sliding so the crawl reads as a belly-slide.
-  const targetTilt = player.slideTimer > 0 ? -0.18 : 0;
-  player.model.rotation.z += (targetTilt - player.model.rotation.z) * Math.min(1, dt * 12);
+  player.root.position.set(player.x, player.y, 0);
+  // Lean into lane changes.
+  const lean = (targetX - player.x) * -0.12;
+  player.root.rotation.z += (lean - player.root.rotation.z) * Math.min(1, dt * 14);
 }
 
 function playerBox() {
   const h = player.slideTimer > 0 ? CFG.slideHeight : CFG.standHeight;
-  return { minX: -CFG.halfWidth, maxX: CFG.halfWidth, minY: player.y + 0.05, maxY: player.y + h };
+  return {
+    minX: player.x - CFG.halfWidth, maxX: player.x + CFG.halfWidth,
+    minY: player.y + 0.05, maxY: player.y + h,
+    minZ: -CFG.halfDepth, maxZ: CFG.halfDepth,
+  };
 }
 
-function overlaps(p, e) {
-  const x = e.obj.position.x;
-  const y = e.obj.position.y;
-  return p.maxX > x + e.box.minX && p.minX < x + e.box.maxX && p.maxY > y + e.box.minY && p.minY < y + e.box.maxY;
+/** AABB test; `dz` widens the obstacle along its travel so fast frames can't tunnel through. */
+function overlaps(p, e, dz = 0) {
+  const { x, y, z } = e.obj.position;
+  const b = e.box;
+  return p.maxX > x + b.minX && p.minX < x + b.maxX
+    && p.maxY > y + b.minY && p.minY < y + b.maxY
+    && p.maxZ > z + b.minZ - dz && p.minZ < z + b.maxZ;
+}
+
+// ---------------------------------------------------------------- snowfall
+
+function buildSnowfall() {
+  const COUNT = IS_TOUCH ? 650 : 1200;
+  const pos = new Float32Array(COUNT * 3);
+  const vel = new Float32Array(COUNT);
+  for (let i = 0; i < COUNT; i++) {
+    pos[i * 3] = rand(-16, 16);
+    pos[i * 3 + 1] = rand(0, 16);
+    pos[i * 3 + 2] = rand(-50, 9);
+    vel[i] = rand(1.2, 3);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const points = new THREE.Points(geo, new THREE.PointsMaterial({
+    size: 0.13, map: world.tex.circle_05, transparent: true, depthWrite: false, opacity: 0.95, color: 0xffffff,
+  }));
+  points.frustumCulled = false;
+  scene.add(points);
+  world.snow = { points, pos, vel, count: COUNT };
+}
+
+function updateSnow(dt, dz, t) {
+  const { pos, vel, count, points } = world.snow;
+  for (let i = 0; i < count; i++) {
+    const k = i * 3;
+    pos[k + 1] -= vel[i] * dt;
+    pos[k] += Math.sin(t * 0.8 + i) * 0.25 * dt;
+    pos[k + 2] += dz * 0.9;
+    if (pos[k + 1] < 0) pos[k + 1] += 16;
+    if (pos[k + 2] > 9) pos[k + 2] -= 59;
+  }
+  points.geometry.attributes.position.needsUpdate = true;
 }
 
 // ---------------------------------------------------------------- game state
 
 const sfx = new Sfx();
 const state = {
-  mode: 'loading',  // loading | menu | playing | paused | over
+  mode: 'loading',  // loading | menu | playing | paused | dying | over
   distance: 0,
   bonus: 0,
+  peanuts: 0,
   score: 0,
   level: 0,
   speed: CFG.baseSpeed,
@@ -811,22 +745,31 @@ const state = {
   best: 0,
   shake: 0,
   deathTimer: 0,
+  slowmo: 0,
+  fovKick: 0,
   pendingScore: null,
   time: 0,
+  runTime: 0,
 };
 
 try { state.best = Number(localStorage.getItem('runner-best')) || 0; } catch { /* storage unavailable */ }
 
 function setOverlay(id) {
   for (const el of document.querySelectorAll('.overlay')) el.hidden = el.id !== id;
+  document.body.classList.toggle('in-run', id === null);
 }
 
 function resetRun() {
   for (const e of world.obstacles) release(e);
-  for (const e of world.coins) release(e);
+  for (const e of world.peanuts) release(e);
   world.obstacles.length = 0;
-  world.coins.length = 0;
-  Object.assign(state, { distance: 0, bonus: 0, score: 0, level: 0, speed: CFG.baseSpeed, nextSpawnAt: 22, shake: 0, deathTimer: 0 });
+  world.peanuts.length = 0;
+  world.vfx?.clear();
+  world.track?.reset();
+  Object.assign(state, {
+    distance: 0, bonus: 0, peanuts: 0, score: 0, level: 0, speed: CFG.baseSpeed, nextSpawnAt: 26,
+    shake: 0, deathTimer: 0, slowmo: 0, fovKick: 0, runTime: 0,
+  });
   resetPlayer();
   updateHud();
 }
@@ -839,6 +782,35 @@ function startGame() {
   setOverlay(null);
   playAction('run', 0.2);
   sfx.startMusic();
+  perf.reset();
+  if (IS_TOUCH) {
+    // Immersive phone play: fullscreen where supported, keep the screen awake, teach the swipes once.
+    document.documentElement.requestFullscreen?.({ navigationUI: 'hide' }).catch(() => {});
+    navigator.wakeLock?.request('screen').then((l) => { wakeLock = l; }).catch(() => {});
+    showSwipeHint();
+  }
+}
+
+let wakeLock = null;
+let hintTimer = null;
+
+function buzz(pattern) {
+  try { navigator.vibrate?.(pattern); } catch { /* not supported */ }
+}
+
+function showSwipeHint() {
+  let seen = false;
+  try { seen = localStorage.getItem('runner-hinted') === '1'; } catch { /* ignore */ }
+  if (seen) return;
+  $('#swipe-hint').hidden = false;
+  clearTimeout(hintTimer);
+  hintTimer = setTimeout(hideSwipeHint, 6000);
+}
+
+function hideSwipeHint() {
+  if ($('#swipe-hint').hidden) return;
+  $('#swipe-hint').hidden = true;
+  try { localStorage.setItem('runner-hinted', '1'); } catch { /* ignore */ }
 }
 
 function pauseGame() {
@@ -865,11 +837,21 @@ function toMenu() {
 
 function gameOver() {
   state.mode = 'dying';
-  state.deathTimer = 1.1;
-  state.shake = 0.45;
+  hideSwipeHint();
+  wakeLock?.release().catch(() => {});
+  wakeLock = null;
+  state.deathTimer = 1.2;
+  state.shake = 0.5;
+  state.slowmo = 0.35;
   player.slideTimer = 0;
-  player.model.rotation.z = 0;
+  player.root.rotation.z = 0;
   playAction('death', 0.08);
+  world.vfx.crash({ x: player.x, y: player.y, z: 0 });
+  buzz(80);
+  const flash = $('#flash');
+  flash.classList.remove('go');
+  void flash.offsetWidth; // restart the CSS animation
+  flash.classList.add('go');
   sfx.crash();
   sfx.stopMusic();
 }
@@ -883,7 +865,8 @@ async function showGameOver() {
   }
   $('#final-score').textContent = score.toLocaleString();
   $('#final-best').textContent = '–';
-  $('#over-title').textContent = pick(['Game Over', 'Oh, Fudge!', 'Snowed Under!', 'Ho-Ho-Oops!']);
+  $('#final-peanuts').textContent = `🥜 ${state.peanuts} peanuts · ⏱ ${formatTime(state.runTime)}`;
+  $('#over-title').textContent = pick(['Game Over', 'Oh, Nuts!', 'Snowed Under!', 'Ho-Ho-Oops!']);
   setOverlay('over-screen');
   updateHud();
 
@@ -923,13 +906,23 @@ async function submitScore(score) {
 
 // ---------------------------------------------------------------- HUD
 
-const hud = { score: $('#hud-score'), best: $('#hud-best'), speed: $('#hud-speed') };
+const hud = { score: $('#hud-score'), time: $('#hud-time'), best: $('#hud-best'), speed: $('#hud-speed') };
 let toastTimer = null;
+let lastHud = '';
+
+function formatTime(s) {
+  const m = Math.floor(s / 60);
+  return `${m}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+}
 
 function updateHud() {
+  const key = `${state.score}|${Math.floor(state.runTime)}|${state.level}|${state.best}`;
+  if (key === lastHud) return;
+  lastHud = key;
   hud.score.textContent = state.score.toLocaleString();
+  hud.time.textContent = formatTime(state.runTime);
   hud.best.textContent = Math.max(state.best, state.score).toLocaleString();
-  hud.speed.textContent = `×${(state.speed / CFG.baseSpeed).toFixed(2)}`;
+  hud.speed.textContent = `×${(CFG.baseSpeed * Math.pow(CFG.speedStep, state.level) / CFG.baseSpeed).toFixed(2)}`;
 }
 
 function toast(text) {
@@ -940,48 +933,91 @@ function toast(text) {
   toastTimer = setTimeout(() => el.classList.remove('show'), 1100);
 }
 
+const _proj = new THREE.Vector3();
+function floatText(text, pos) {
+  _proj.set(pos.x, pos.y, pos.z).project(camera);
+  const el = document.createElement('div');
+  el.className = 'float-text';
+  el.textContent = text;
+  el.style.left = `${(_proj.x * 0.5 + 0.5) * window.innerWidth}px`;
+  el.style.top = `${(-_proj.y * 0.5 + 0.5) * window.innerHeight}px`;
+  $('#float-layer').append(el);
+  setTimeout(() => el.remove(), 800);
+}
+
+// ---------------------------------------------------------------- quality
+
+/** Watches frame times early in each run and drops bloom / resolution on slow devices. */
+const perf = {
+  frames: 0, total: 0, settled: false,
+  reset() { this.frames = 0; this.total = 0; },
+  sample(ms) {
+    if (this.settled || state.mode !== 'playing') return;
+    this.frames++;
+    this.total += ms;
+    if (this.frames < 120) return;
+    const avg = this.total / this.frames;
+    this.settled = true;
+    if (avg > 24) {
+      useBloom = false;
+      pixelRatio = Math.min(pixelRatio, 1.25);
+      renderer.setPixelRatio(pixelRatio);
+      composer.setPixelRatio(pixelRatio);
+      console.info(`Christmas Runner: ${avg.toFixed(1)} ms/frame, switching to low effects`);
+    }
+  },
+};
+
 // ---------------------------------------------------------------- main loop
 
 const clock = new THREE.Clock();
 
-function step(dt) {
+function step(rawDt) {
+  let dt = rawDt;
+  if (state.slowmo > 0) {
+    state.slowmo -= rawDt;
+    dt *= 0.3;
+  }
   state.time += dt;
-  let shift = 0;
+  let dz = 0;
 
   if (state.mode === 'playing') {
-    shift = state.speed * dt;
-    state.distance += shift;
+    dz = state.speed * dt;
+    state.distance += dz;
+    state.runTime += dt;
 
-    // Spawning: gaps scale with speed so reaction time stays roughly constant.
+    // Spawning rows: gaps scale with speed so reaction time stays roughly constant.
     if (state.distance >= state.nextSpawnAt) {
-      spawnObstacle(CFG.spawnX);
-      const minGap = Math.max(10, state.speed * 1.05);
-      const gap = rand(minGap, minGap * 1.8);
-      if (gap > minGap * 1.45 && Math.random() < 0.5) spawnCoinRow(CFG.spawnX + gap * 0.35, 3);
-      state.nextSpawnAt = state.distance + gap;
+      spawnRow(CFG.spawnZ);
+      const minGap = Math.max(13, state.speed * 1.15);
+      state.nextSpawnAt = state.distance + rand(minGap, minGap * 1.6);
     }
 
-    for (const e of world.obstacles) e.obj.position.x -= shift;
-    for (const c of world.coins) {
-      c.obj.position.x -= shift;
-      c.obj.rotation.y += dt * 3;
-      c.obj.position.y = c.baseY + Math.sin(state.time * 4 + c.obj.position.x) * 0.08;
+    for (const e of world.obstacles) e.obj.position.z += dz;
+    for (const c of world.peanuts) {
+      c.obj.position.z += dz;
+      c.obj.userData.nut.rotation.y += dt * 3.5;
+      c.obj.position.y = c.baseY + Math.sin(state.time * 4 + c.obj.position.z * 0.5) * 0.08;
     }
     cull(world.obstacles);
-    cull(world.coins);
+    cull(world.peanuts);
 
     updatePlayer(dt);
     const pb = playerBox();
-    for (let i = world.coins.length - 1; i >= 0; i--) {
-      if (overlaps(pb, world.coins[i])) {
-        release(world.coins[i]);
-        world.coins.splice(i, 1);
-        state.bonus += CFG.coinValue;
+    for (let i = world.peanuts.length - 1; i >= 0; i--) {
+      const c = world.peanuts[i];
+      if (overlaps(pb, c, dz)) {
+        world.vfx.pickup(c.obj.position);
+        floatText(`+${CFG.peanutValue}`, { x: c.obj.position.x, y: c.obj.position.y + 0.6, z: c.obj.position.z });
+        release(c);
+        world.peanuts.splice(i, 1);
+        state.bonus += CFG.peanutValue;
+        state.peanuts++;
         sfx.pickup();
       }
     }
     for (const e of world.obstacles) {
-      if (overlaps(pb, e)) { gameOver(); break; }
+      if (overlaps(pb, e, dz)) { gameOver(); break; }
     }
 
     state.score = Math.floor(state.distance) + state.bonus;
@@ -989,6 +1025,9 @@ function step(dt) {
     if (level > state.level) {
       state.level = level;
       sfx.levelUp();
+      state.fovKick = 1;
+      world.vfx.levelUp({ x: player.x, y: player.y, z: 0 });
+      buzz([15, 40, 15]);
       toast(`Faster! ×${Math.pow(CFG.speedStep, level).toFixed(2)}`);
     }
     // Ease toward the target speed so level-ups don't jolt.
@@ -996,42 +1035,46 @@ function step(dt) {
     state.speed += (target - state.speed) * Math.min(1, dt * 2);
     updateHud();
   } else if (state.mode === 'dying') {
-    state.deathTimer -= dt;
-    // Fall back to the ground if the crash happened mid-air.
+    state.deathTimer -= rawDt;
     if (player.y > 0) {
       player.vy += CFG.gravity * dt;
       player.y = Math.max(0, player.y + player.vy * dt);
       player.root.position.y = player.y;
     }
     if (state.deathTimer <= 0) showGameOver();
-  } else if (state.mode === 'menu') {
-    // Gentle drift on the title screen.
-    shift = 2.5 * dt;
   }
 
-  if (shift) scrollLayers(shift);
-  updateSnow(dt, shift, state.time);
+  world.track.update(dz, state.time);
+  updateSnow(dt, dz, state.time);
+  world.vfx.ambient(dt, { x: player.x, y: player.y }, state.mode === 'playing' ? state.speed / CFG.baseSpeed : 0);
+  world.vfx.update(dt, dz);
   player.mixer?.update(dt);
 
-  // Camera follows jumps a little and shakes on impact.
-  const camY = CAM_BASE.y + player.y * 0.35;
-  camera.position.x = CAM_BASE.x;
-  camera.position.y += (camY - camera.position.y) * Math.min(1, dt * 5);
-  camera.position.z = CAM_BASE.z;
+  // Camera: trails the runner's lane, rises a little on jumps, kicks FOV on speed-ups, shakes on impact.
+  state.fovKick = Math.max(0, state.fovKick - dt * 1.6);
+  camera.fov = CAM.fov + Math.sin(state.fovKick * Math.PI) * 7 + (state.speed / CFG.baseSpeed - 1) * 4;
+  camera.updateProjectionMatrix();
+  const lerp = Math.min(1, dt * 6);
+  camera.position.x += (player.x * 0.7 - camera.position.x) * lerp;
+  camera.position.y += (CAM.y + player.y * 0.35 - camera.position.y) * lerp;
+  camera.position.z = CAM.z;
+  let sx = 0, sy = 0;
   if (state.shake > 0) {
-    state.shake = Math.max(0, state.shake - dt);
+    state.shake = Math.max(0, state.shake - rawDt);
     const s = state.shake * 0.5;
-    camera.position.x += rand(-s, s);
-    camera.position.y += rand(-s, s);
+    sx = rand(-s, s); sy = rand(-s, s);
   }
-  camera.lookAt(CAM_LOOK.x, CAM_LOOK.y + player.y * 0.25, CAM_LOOK.z);
-  glow.position.y = 2.5 + player.y;
-  if (world.aurora) world.aurora.material.opacity = 0.75 + Math.sin(state.time * 0.7) * 0.25;
+  camera.position.x += sx;
+  camera.position.y += sy;
+  camera.lookAt(player.x * 0.45, CAM.lookY + player.y * 0.3, CAM.lookZ);
+  heroGlow.position.set(player.x, 2.4 + player.y, 1.6);
+  sun.position.x = -7 + player.x;
+  sun.target.position.x = player.x;
 }
 
 function cull(list) {
   for (let i = list.length - 1; i >= 0; i--) {
-    if (list[i].obj.position.x < CFG.despawnX) {
+    if (list[i].obj.position.z > CFG.despawnZ) {
       release(list[i]);
       list.splice(i, 1);
     }
@@ -1039,9 +1082,12 @@ function cull(list) {
 }
 
 function frame() {
-  const dt = Math.min(clock.getDelta(), 1 / 20);
+  const rawDt = clock.getDelta();
+  perf.sample(rawDt * 1000);
+  const dt = Math.min(rawDt, 1 / 20);
   if (state.mode !== 'paused' && state.mode !== 'loading') step(dt);
-  renderer.render(scene, camera);
+  if (useBloom) composer.render();
+  else renderer.render(scene, camera);
 }
 
 // ---------------------------------------------------------------- input
@@ -1053,7 +1099,7 @@ function isTyping(e) {
 window.addEventListener('keydown', (e) => {
   if (isTyping(e)) return;
   const k = e.code;
-  if (['Space', 'ArrowUp', 'ArrowDown'].includes(k)) e.preventDefault();
+  if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(k)) e.preventDefault();
   if (k === 'KeyM') { toggleMute(); return; }
   if (e.repeat && k !== 'ArrowDown' && k !== 'KeyS') return;
 
@@ -1068,37 +1114,59 @@ window.addEventListener('keydown', (e) => {
   if (state.mode !== 'playing') return;
   if (k === 'Space' || k === 'ArrowUp' || k === 'KeyW') jump();
   else if (k === 'ArrowDown' || k === 'KeyS') slide();
+  else if (k === 'ArrowLeft' || k === 'KeyA') steer(-1);
+  else if (k === 'ArrowRight' || k === 'KeyD') steer(1);
   else if (k === 'KeyP' || k === 'Escape') pauseGame();
 });
 
+// Swipes are read from the whole screen (not just the canvas) so a thumb that starts over the
+// HUD still counts; touches that begin on buttons, menus or the sign-in form are left alone.
 let touchStart = null;
-renderer.domElement.addEventListener('touchstart', (e) => {
+const isUiTouch = (e) => e.target.closest?.('button, a, input, .overlay, .modal');
+window.addEventListener('touchstart', (e) => {
+  if (state.mode !== 'playing' || isUiTouch(e)) { touchStart = null; return; }
   const t = e.changedTouches[0];
-  touchStart = { x: t.clientX, y: t.clientY, time: performance.now() };
+  touchStart = { x: t.clientX, y: t.clientY };
 }, { passive: true });
-renderer.domElement.addEventListener('touchend', (e) => {
+window.addEventListener('touchmove', (e) => {
+  if (state.mode === 'playing' && !isUiTouch(e)) e.preventDefault(); // no scroll / pull-to-refresh mid-run
+  if (!touchStart || state.mode !== 'playing') return;
+  // Fire the swipe as soon as it is clear, without waiting for the finger to lift.
+  const t = e.changedTouches[0];
+  const min = Math.min(window.innerWidth, window.innerHeight) * 0.07;
+  if (handleSwipe(t.clientX - touchStart.x, t.clientY - touchStart.y, min)) touchStart = null;
+}, { passive: false });
+window.addEventListener('touchend', (e) => {
   if (!touchStart || state.mode !== 'playing') return;
   const t = e.changedTouches[0];
-  const dy = t.clientY - touchStart.y;
-  const dx = t.clientX - touchStart.x;
+  if (!handleSwipe(t.clientX - touchStart.x, t.clientY - touchStart.y, 20)) jump();
   touchStart = null;
-  if (dy > 30 && Math.abs(dy) > Math.abs(dx)) slide();
-  else jump();
 }, { passive: true });
+
+function handleSwipe(dx, dy, min) {
+  if (Math.max(Math.abs(dx), Math.abs(dy)) < min) return false;
+  hideSwipeHint();
+  if (Math.abs(dx) > Math.abs(dy)) steer(dx > 0 ? 1 : -1);
+  else if (dy > 0) slide();
+  else jump();
+  return true;
+}
 
 document.addEventListener('visibilitychange', () => { if (document.hidden) pauseGame(); });
 
 window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  // Narrow (portrait) screens: widen the view and slide it so the runner sits at the left edge
-  // with as much of the track ahead visible as possible.
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  camera.aspect = w / h;
+  // Portrait (the reference look) uses a taller view; landscape pulls the camera in a bit.
   const portrait = camera.aspect < 1;
-  camera.fov = portrait ? 62 : 48;
-  CAM_BASE.set(portrait ? 2.4 : 4, portrait ? 4.6 : 3.9, portrait ? 14 : 11);
-  CAM_LOOK.set(portrait ? 3.0 : 6.5, 1.5, 0);
-  camera.position.copy(CAM_BASE);
+  Object.assign(CAM, portrait
+    ? { y: 3.5, z: 5.6, lookY: 1.4, lookZ: -10, fov: 60 }
+    : { y: 3.6, z: 6.6, lookY: 1.5, lookZ: -10, fov: 52 });
+  camera.position.set(0, CAM.y, CAM.z);
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setSize(w, h);
+  composer.setSize(w, h);
 });
 window.dispatchEvent(new Event('resize'));
 
@@ -1151,13 +1219,15 @@ async function boot() {
   wireUi();
   auth.refresh();
   try {
-    const models = await loadModels();
-    buildGround(models);
-    buildMidLayer(models);
-    buildFarLayer(models);
+    const [models, tex, bodyTex, legsTex, logoTex] = await Promise.all([
+      loadModels(), loadVfxTextures(manager), loadHeroTexture('hero_body.png'), loadHeroTexture('hero_legs.png'), loadBrandLogo(),
+    ]);
+    world.tex = tex;
+    world.track = new Track(scene, models, tex);
+    world.vfx = new Vfx(scene, tex);
     buildSnowfall();
-    buildTemplates(models);
-    buildPlayer(models);
+    buildTemplates(models, tex);
+    buildPlayer(models, bodyTex, legsTex, logoTex);
   } catch (err) {
     console.error(err);
     $('#loading-screen .muted').textContent = 'Could not load the game assets. Please refresh.';
@@ -1165,10 +1235,12 @@ async function boot() {
   }
   resetRun();
   toMenu();
+  // Compile shaders up front so the first jump / pickup doesn't hitch.
+  renderer.compile(scene, camera);
   renderer.setAnimationLoop(frame);
 }
 
 boot();
 
 // Exposed for automated smoke tests and debugging in the console.
-window.__runner = { state, player, world, startGame, jump, slide, step, CFG };
+window.__runner = { state, player, world, startGame, jump, slide, steer, step, CFG };

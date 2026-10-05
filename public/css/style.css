@@ -20,6 +20,11 @@ html, body {
   margin: 0;
   height: 100%;
   overflow: hidden;
+  overscroll-behavior: none;       /* no pull-to-refresh / bounce on phones */
+  touch-action: none;              /* no double-tap zoom or panning */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
   background: #0b1430;
   color: var(--ink);
   font-family: var(--font-body);
@@ -36,30 +41,72 @@ html, body {
 .hud {
   position: fixed;
   top: 0; left: 0; right: 0;
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 14px 16px;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  grid-template-areas: "chips ribbon actions";
+  align-items: start;
+  gap: 10px;
+  padding: calc(12px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right)) 12px calc(16px + env(safe-area-inset-left));
   pointer-events: none;
   z-index: 15; /* above overlays so Sign in / mute stay reachable from menus */
 }
 .hud > * { pointer-events: auto; }
 
-.hud-stats { display: flex; gap: 10px; flex-wrap: wrap; }
-.stat {
+/* Red 3D ribbon with gold lettering (Score | Time) */
+.ribbon {
+  grid-area: ribbon;
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 8px 30px 10px;
+  border-radius: 18px 18px 26px 26px / 18px 18px 30px 30px;
+  background: linear-gradient(180deg, #ff4b4b 0%, #d81c25 38%, #a90d18 100%);
+  border: 3px solid #ffd76a;
+  box-shadow: 0 6px 0 #6e0710, 0 10px 24px rgba(0, 0, 0, 0.35), inset 0 3px 0 rgba(255, 255, 255, 0.35), inset 0 -4px 0 rgba(0, 0, 0, 0.2);
+  pointer-events: none;
+}
+.ribbon::before, .ribbon::after {
+  /* folded tails */
+  content: '';
+  position: absolute; top: 14px;
+  width: 26px; height: 34px;
+  background: linear-gradient(180deg, #b5101c, #7d0812);
+  z-index: -1;
+}
+.ribbon::before { left: -18px; clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%, 35% 50%); }
+.ribbon::after { right: -18px; clip-path: polygon(0 0, 100% 0, 65% 50%, 100% 100%, 0 100%); }
+.ribbon-cell { display: flex; flex-direction: column; align-items: center; min-width: 92px; }
+.ribbon-label, .ribbon-value {
+  font-family: 'Lilita One', 'Arial Rounded MT Bold', 'Nunito', sans-serif;
+  color: #ffe27a;
+  line-height: 1;
+  -webkit-text-stroke: 1px #7a3b00;
+  text-shadow: 0 2px 0 #8a2c00, 0 0 10px rgba(255, 210, 90, 0.45);
+  font-variant-numeric: tabular-nums;
+}
+.ribbon-label { font-size: 22px; letter-spacing: 0.04em; text-transform: uppercase; color: #ffd84a; -webkit-text-stroke: 1px #5a2600; }
+.ribbon-value { font-size: 34px; color: #fff6dc; margin-top: 2px; }
+.ribbon-divider {
+  width: 3px; align-self: stretch; margin: 2px 16px;
+  background: linear-gradient(180deg, transparent, #ffd76a, transparent);
+  transform: skewX(-14deg);
+}
+
+.hud-chips { grid-area: chips; display: flex; gap: 8px; flex-wrap: wrap; justify-self: start; }
+.chip {
   display: flex; flex-direction: column;
-  min-width: 84px;
-  padding: 6px 14px;
-  border-radius: 14px;
-  background: rgba(10, 18, 40, 0.6);
+  min-width: 70px;
+  padding: 5px 12px;
+  border-radius: 12px;
+  background: rgba(16, 26, 56, 0.55);
   border: 1px solid var(--card-border);
   backdrop-filter: blur(6px);
 }
+.chip-label { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); font-weight: 800; }
+.chip-value { font-size: 17px; font-weight: 900; font-variant-numeric: tabular-nums; }
 .stat-label { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); font-weight: 700; }
-.stat-value { font-size: 22px; font-weight: 900; font-variant-numeric: tabular-nums; }
 
-.hud-actions { display: flex; gap: 8px; align-items: center; }
+.hud-actions { grid-area: actions; display: flex; gap: 8px; align-items: center; justify-self: end; }
 .icon-btn {
   width: 40px; height: 40px;
   border-radius: 50%;
@@ -105,7 +152,7 @@ html, body {
 .overlay, .modal {
   position: fixed; inset: 0;
   display: grid; place-items: center;
-  padding: 16px;
+  padding: calc(16px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom));
   z-index: 10;
   background: radial-gradient(ellipse at center, rgba(8, 14, 34, 0.35), rgba(8, 14, 34, 0.75));
   overflow-y: auto;
@@ -156,8 +203,17 @@ kbd {
   font: 800 13px var(--font-body); text-align: center;
   box-shadow: 0 2px 0 #9aa6c8;
 }
-.touch-only { display: none !important; }
-@media (pointer: coarse) { .touch-only { display: flex !important; } }
+/* Touch-first: phones see gesture help, keyboards see key help. */
+.key-controls { display: none !important; }
+@media (pointer: fine) {
+  .key-controls { display: grid !important; }
+  p.key-controls { display: block !important; }
+  .touch-controls { display: none !important; }
+}
+.touch-controls li { flex-wrap: nowrap !important; }
+.gesture { font-size: 20px; flex: 0 0 64px; text-align: center; }
+input, textarea { -webkit-user-select: text; user-select: text; touch-action: manipulation; }
+button { touch-action: manipulation; }
 
 .btn-row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 8px; }
 .btn {
@@ -281,17 +337,97 @@ kbd {
 .form-error { min-height: 1.3em; color: #ff9aa8; font-size: 14px; margin: 10px 0; }
 
 .credits {
-  position: fixed; bottom: 6px; right: 10px;
+  position: fixed; bottom: calc(6px + env(safe-area-inset-bottom)); right: 10px;
   font-size: 11px; color: rgba(255, 255, 255, 0.45);
   pointer-events: none; z-index: 3;
 }
 
-@media (max-width: 600px) {
-  .hud { padding: 10px; flex-direction: column; }
-  .hud-actions { align-self: flex-end; order: -1; }
-  .stat { min-width: 70px; padding: 4px 10px; }
-  .stat-value { font-size: 18px; }
+@media (max-width: 700px) {
+  .hud {
+    grid-template-columns: 1fr auto;
+    grid-template-areas: "ribbon ribbon" "chips actions";
+    padding: calc(6px + env(safe-area-inset-top)) calc(10px + env(safe-area-inset-right)) 8px calc(10px + env(safe-area-inset-left));
+    row-gap: 8px;
+  }
+  .ribbon { justify-self: center; padding: 6px 22px 8px; }
+  .ribbon-cell { min-width: 74px; }
+  .ribbon-label { font-size: 17px; }
+  .ribbon-value { font-size: 27px; }
+  .chip { min-width: 58px; padding: 3px 9px; }
+  .chip-value { font-size: 14px; }
+  .icon-btn { width: 34px; height: 34px; font-size: 15px; }
+  .user-chip { padding: 4px 6px 4px 4px; gap: 5px; font-size: 13px; }
+  .user-avatar { width: 24px; height: 24px; }
+  .user-name { max-width: 84px; }
   .card { padding: 24px 18px 18px; }
   .final-score strong { font-size: 28px; }
   .btn { min-width: 120px; }
 }
+
+/* ---------------------------------------------------------------- effects overlays */
+
+.flash {
+  position: fixed; inset: 0; pointer-events: none; z-index: 6;
+  background: radial-gradient(circle at 50% 60%, rgba(255, 255, 255, 0.95), rgba(255, 240, 220, 0.6));
+  opacity: 0;
+}
+.flash.go { animation: flash 0.45s ease-out; }
+@keyframes flash { 0% { opacity: 0.85; } 100% { opacity: 0; } }
+
+.float-layer { position: fixed; inset: 0; pointer-events: none; z-index: 7; overflow: hidden; }
+.float-text {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  font-family: 'Lilita One', 'Nunito', sans-serif;
+  font-size: 26px;
+  color: #ffe27a;
+  -webkit-text-stroke: 1px #7a3b00;
+  text-shadow: 0 2px 0 #8a2c00, 0 0 12px rgba(255, 200, 80, 0.7);
+  animation: float-up 0.8s ease-out forwards;
+}
+@keyframes float-up {
+  0% { opacity: 0; transform: translate(-50%, -30%) scale(0.6); }
+  20% { opacity: 1; transform: translate(-50%, -60%) scale(1.15); }
+  100% { opacity: 0; transform: translate(-50%, -160%) scale(1); }
+}
+
+/* Vignette for a cosy, framed look */
+body::after {
+  content: '';
+  position: fixed; inset: 0; pointer-events: none; z-index: 2;
+  background: radial-gradient(ellipse at 50% 55%, transparent 55%, rgba(10, 20, 50, 0.38) 100%);
+}
+
+.brand-logo { display: block; max-width: 160px; max-height: 80px; margin: 0 auto 6px; object-fit: contain; }
+.peanut-line { margin: 2px 0 0; font-weight: 700; }
+
+/* Bigger touch targets on phones */
+@media (pointer: coarse) {
+  .icon-btn { width: 44px; height: 44px; }
+  .link-btn { padding: 8px 12px; }
+  .btn { padding: 14px 24px; font-size: 18px; }
+  .credits { display: none; }
+}
+
+/* First-run gesture tutorial */
+.swipe-hint {
+  position: fixed; left: 50%; bottom: calc(10px + env(safe-area-inset-bottom));
+  width: max-content; max-width: calc(100% - 32px);
+  transform: translateX(-50%);
+  z-index: 8; pointer-events: none;
+  text-align: center;
+  padding: 6px 14px 8px;
+  border-radius: 14px;
+  background: rgba(12, 20, 46, 0.6);
+  border: 1px solid var(--card-border);
+  backdrop-filter: blur(6px);
+  font-weight: 800; font-size: 13px; line-height: 1.4;
+  animation: hint-in 0.3s ease-out;
+}
+.swipe-hint p { margin: 4px 0 0; }
+.swipe-hand { font-size: 24px; animation: swipe 1.6s ease-in-out infinite; }
+@keyframes swipe {
+  0%, 100% { transform: translateX(-34px) rotate(-10deg); }
+  50% { transform: translateX(34px) rotate(10deg); }
+}
+@keyframes hint-in { from { opacity: 0; transform: translate(-50%, 12px); } }

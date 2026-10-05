@@ -84,3 +84,10 @@ def test_leaderboard(client):
 def test_index_and_static(client):
     assert "Christmas" in client.get("/").text
     assert client.get("/js/game.js").status_code == 200
+
+
+def test_brand_logo_optional(client):
+    from app import main
+
+    expected = "/assets/brand/scan-logo.png" if main.BRAND_LOGO.is_file() else None
+    assert client.get("/api/brand").json() == {"logo": expected}

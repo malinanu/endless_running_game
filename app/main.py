@@ -34,6 +34,15 @@ app.add_middleware(
 app.include_router(router)
 
 
+BRAND_LOGO = PUBLIC_DIR / "assets" / "brand" / "scan-logo.png"
+
+
+@app.get("/api/brand")
+def brand():
+    """Tells the client whether the optional brand logo has been installed."""
+    return {"logo": "/assets/brand/scan-logo.png" if BRAND_LOGO.is_file() else None}
+
+
 @app.get("/", include_in_schema=False)
 def index():
     return FileResponse(PUBLIC_DIR / "index.html")

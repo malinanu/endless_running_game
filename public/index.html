@@ -2,12 +2,20 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#c81824">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Xmas Runner">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/icon-180.png">
   <title>Christmas Runner</title>
   <meta name="description" content="A festive 3D endless runner: jump the presents, slide under the icicles, top the leaderboard.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Mountains+of+Christmas:wght@700&family=Nunito:wght@500;700;900&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Mountains+of+Christmas:wght@700&family=Nunito:wght@500;700;900&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/css/style.css">
   <script type="importmap">
     { "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/addons/" } }
@@ -18,10 +26,14 @@
 
   <!-- HUD -->
   <header class="hud">
-    <div class="hud-stats">
-      <div class="stat"><span class="stat-label">Score</span><span class="stat-value" id="hud-score">0</span></div>
-      <div class="stat"><span class="stat-label">Best</span><span class="stat-value" id="hud-best">0</span></div>
-      <div class="stat"><span class="stat-label">Speed</span><span class="stat-value" id="hud-speed">×1.00</span></div>
+    <div class="ribbon" role="status" aria-label="Score and time">
+      <div class="ribbon-cell"><span class="ribbon-label">Score</span><span class="ribbon-value" id="hud-score">0</span></div>
+      <div class="ribbon-divider" aria-hidden="true"></div>
+      <div class="ribbon-cell"><span class="ribbon-label">Time</span><span class="ribbon-value" id="hud-time">0:00</span></div>
+    </div>
+    <div class="hud-chips">
+      <div class="chip"><span class="chip-label">Best</span><span class="chip-value" id="hud-best">0</span></div>
+      <div class="chip"><span class="chip-label">Speed</span><span class="chip-value" id="hud-speed">×1.00</span></div>
     </div>
     <div class="hud-actions">
       <button class="icon-btn" id="mute-btn" type="button" aria-label="Toggle sound" title="Sound (M)">🔔</button>
@@ -35,12 +47,19 @@
     </div>
   </header>
   <div class="level-toast" id="level-toast" aria-live="polite"></div>
+  <div class="flash" id="flash" aria-hidden="true"></div>
+  <div class="float-layer" id="float-layer" aria-hidden="true"></div>
+  <div class="swipe-hint" id="swipe-hint" hidden aria-hidden="true">
+    <div class="swipe-hand">👆</div>
+    <p>Swipe <b>← →</b> to change lanes<br>Swipe <b>↑</b> to jump · <b>↓</b> to slide</p>
+  </div>
 
   <!-- Loading -->
   <section class="overlay" id="loading-screen">
     <div class="card card-narrow">
+      <img class="brand-logo" alt="" hidden>
       <h1 class="title">Christmas Runner</h1>
-      <p class="muted">Wrapping presents…</p>
+      <p class="muted">Roasting peanuts…</p>
       <div class="progress"><div class="progress-bar" id="load-bar"></div></div>
     </div>
   </section>
@@ -48,13 +67,19 @@
   <!-- Start menu -->
   <section class="overlay" id="menu-screen" hidden>
     <div class="card">
+      <img class="brand-logo" alt="" hidden>
       <h1 class="title">Christmas Runner</h1>
-      <p class="subtitle">Dash through the snowy village before Christmas morning!</p>
-      <ul class="controls">
+      <p class="subtitle">Race through the enchanted winter forest and grab every peanut!</p>
+      <ul class="controls touch-controls">
+        <li><span class="gesture">👈 👉</span><span>Swipe to switch lanes</span></li>
+        <li><span class="gesture">👆</span><span>Swipe up or tap to jump</span></li>
+        <li><span class="gesture">👇</span><span>Swipe down to slide under icicles</span></li>
+      </ul>
+      <ul class="controls key-controls">
+        <li><kbd>←</kbd> <kbd>→</kbd><span>Switch lanes</span></li>
         <li><kbd>Space</kbd> / <kbd>↑</kbd><span>Jump over presents, logs &amp; snowmen</span></li>
         <li><kbd>↓</kbd><span>Slide under icicle gates</span></li>
         <li><kbd>P</kbd><span>Pause</span> <kbd>M</kbd><span>Sound</span></li>
-        <li class="touch-only"><span>📱 Tap or swipe up to jump, swipe down to slide</span></li>
       </ul>
       <div class="btn-row">
         <button class="btn btn-primary" id="play-btn" type="button">Play</button>
@@ -83,6 +108,7 @@
         <div><span class="stat-label">Score</span><strong id="final-score">0</strong></div>
         <div><span class="stat-label">Personal best</span><strong id="final-best">–</strong></div>
       </div>
+      <p class="muted peanut-line" id="final-peanuts"></p>
       <p class="save-status" id="save-status"></p>
       <h3 class="board-heading">🎄 Top 10 🎄</h3>
       <ol class="leaderboard" id="over-board"></ol>
@@ -90,7 +116,7 @@
         <button class="btn btn-primary" id="again-btn" type="button">Play again</button>
         <button class="btn" id="save-login-btn" type="button" hidden>Sign in to save</button>
       </div>
-      <p class="muted small">Press <kbd>Space</kbd> to run again</p>
+      <p class="muted small key-controls">Press <kbd>Space</kbd> to run again</p>
     </div>
   </section>
 
@@ -123,7 +149,7 @@
     </form>
   </div>
 
-  <footer class="credits">3D models: KayKit by Kay Lousberg (CC0)</footer>
+  <footer class="credits">3D models: KayKit by Kay Lousberg · VFX: Brackeys (CC0)</footer>
 
   <script type="module" src="/js/game.js"></script>
 </body>
