@@ -1,222 +1,183 @@
 # Deploying Christmas Runner to CloudPanel
 
-This guide puts the game on a CloudPanel server for testing, with GitHub Actions
-deploying automatically every time `main` changes.
+This guide puts the game on a CloudPanel server for testing. Every push to `main`
+is deployed automatically by GitHub Actions. Setup uses only the **CloudPanel web UI** and
+**GitHub's website**. You never need a terminal on the server.
 
 ```
-push to main ──► GitHub Actions: tests ──► SSH to server ──► deploy/deploy.sh
-                                                            ├─ git reset to origin/main
-                                                            ├─ pip install into .venv
-                                                            ├─ systemctl restart christmas-runner
-                                                            └─ wait for /api/health
-Browser ──► Nginx (CloudPanel vhost, HTTPS) ──► 127.0.0.1:8090 uvicorn (FastAPI + SQLite)
+push to main ─► GitHub Actions ─► run tests
+                               └► copy the code to the server over SSH (as the site user)
+                                  ├─ install Python packages
+                                  ├─ switch "current" to the new version and restart the game
+                                  └─ if it doesn't start: switch back automatically and fail
+Phone/browser ─► CloudPanel Nginx (HTTPS) ─► 127.0.0.1:8090 game server
+CloudPanel cron job (every minute) ─► restarts the game if it ever stops (crash, reboot)
 ```
 
-Throughout this guide, replace:
+Replace these placeholders as you go:
 
-| Placeholder | Example | What it is |
-| --- | --- | --- |
-| `DOMAIN` | `runner.example.com` | The test site's domain |
-| `SITE_USER` | `xmasrunner` | The site user CloudPanel creates for the site |
-| `SERVER_IP` | `203.0.113.10` | Your server's public IP |
-
-Commands marked **(root)** run as root; **(site user)** run as `SITE_USER`
-(`sudo -iu SITE_USER` from a root shell, or SSH in as that user).
+| Placeholder | Example |
+| --- | --- |
+| `DOMAIN` | `runner.example.com` |
+| `SITE_USER` | `xmasrunner` (the site user you choose in CloudPanel) |
+| `SERVER_IP` | `203.0.113.10` |
 
 ---
 
-## 1. One-time setup
+## Part 1: CloudPanel (web UI)
 
-### 1.1 Point the domain at the server
+### 1. Point the domain at the server
+At your DNS provider, add an **A record**: `DOMAIN → SERVER_IP`.
 
-At your DNS provider, add an **A record** `DOMAIN → SERVER_IP` (and `AAAA` if you use IPv6).
+### 2. Create the site
+**Sites → + Add Site → Create a Python Site**, then fill in:
 
-### 1.2 Create a Python site in CloudPanel
+| Field | Value |
+| --- | --- |
+| Domain Name | `DOMAIN` |
+| Python Version | 3.11 or newer |
+| App Port | `8090` |
+| Site User / Password | `SITE_USER` and a strong password |
 
-1. CloudPanel → **Sites → Add Site → Create a Python Site**.
-2. Fill in:
-   - **Domain Name**: `DOMAIN`
-   - **Python Version**: 3.11 or newer
-   - **App Port**: `8090` (any free port works; keep it consistent below)
-   - **Site User** / password: choose `SITE_USER`
-3. Click **Create**. CloudPanel creates `/home/SITE_USER/htdocs/DOMAIN` and an Nginx
-   vhost that forwards requests to `127.0.0.1:8090`. CloudPanel does not start Python
-   apps itself; the systemd service in step 1.5 does that.
-4. Site → **SSL/TLS → Actions → New Let's Encrypt Certificate** (once DNS has propagated).
+Click **Create**. CloudPanel makes the folder `/home/SITE_USER/htdocs/DOMAIN` and sets Nginx to forward
+visitors to port 8090. Nothing answers on that port yet. The first deploy takes care of that.
 
-### 1.3 Server packages (root)
+### 3. HTTPS
+Open the site → **SSL/TLS** → **Actions → New Let's Encrypt Certificate** → **Create and Install**.
+(Wait until DNS from step 1 is live.)
 
-```bash
-apt update && apt install -y git python3-venv curl
-command -v systemctl   # note the path; the sudo rule below assumes /usr/bin/systemctl
-```
-
-### 1.4 Get the code onto the server (site user)
+### 4. Let GitHub log in as the site user
+GitHub Actions needs an SSH key to copy the code. Create the key pair **on your own computer**. On Windows,
+macOS and Linux it's the same command in PowerShell or Terminal:
 
 ```bash
-sudo -iu SITE_USER
-cd ~/htdocs
-rm -rf DOMAIN && git clone -b main https://github.com/malinanu/endless_running_game.git DOMAIN
+ssh-keygen -t ed25519 -f christmas-runner-deploy -N "" -C "github-actions"
 ```
 
-If the repository is **private**, use a read-only deploy key instead of HTTPS:
+This makes two files:
+- `christmas-runner-deploy.pub` is the **public** key and goes into CloudPanel.
+- `christmas-runner-deploy` is the **private** key and goes into GitHub (step 6). Keep it secret.
 
-```bash
-ssh-keygen -t ed25519 -f ~/.ssh/github_deploy -N "" -C "SITE_USER@DOMAIN (read-only)"
-cat ~/.ssh/github_deploy.pub
-# GitHub → repo → Settings → Deploy keys → Add deploy key → paste, leave "Allow write access" OFF
-cat >> ~/.ssh/config <<'EOF'
-Host github.com
-  IdentityFile ~/.ssh/github_deploy
-  IdentitiesOnly yes
-EOF
-ssh-keyscan github.com >> ~/.ssh/known_hosts
-cd ~/htdocs && rm -rf DOMAIN && git clone -b main git@github.com:malinanu/endless_running_game.git DOMAIN
-```
-
-Create the virtualenv and the settings file:
-
-```bash
-cd ~/htdocs/DOMAIN
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-mkdir -p ~/.config ~/data
-cp deploy/christmas-runner.env.example ~/.config/christmas-runner.env
-chmod 600 ~/.config/christmas-runner.env
-python3 -c "import secrets; print(secrets.token_urlsafe(48))"   # copy this into SECRET_KEY
-nano ~/.config/christmas-runner.env   # set SECRET_KEY, replace SITE_USER in DB_PATH, check PORT
-```
-
-Set `COOKIE_SECURE=0` until the SSL certificate is in place, then switch it to `1`.
-
-### 1.5 Run it as a service (root)
-
-Set your values once, then paste the rest as-is:
-
-```bash
-SITE_USER=xmasrunner            # your site user
-DOMAIN=runner.example.com       # your domain
-cd /home/$SITE_USER/htdocs/$DOMAIN
-
-sed -e "s/SITE_USER/$SITE_USER/g" -e "s/DOMAIN/$DOMAIN/g" deploy/christmas-runner.service \
-  > /etc/systemd/system/christmas-runner.service
-systemctl daemon-reload
-systemctl enable --now christmas-runner
-systemctl status christmas-runner --no-pager
-curl -s http://127.0.0.1:8090/api/health      # → {"status":"ok"}
-```
-
-Allow the site user to restart the service, and nothing else, so deploys can run without root:
-
-```bash
-sed "s/SITE_USER/$SITE_USER/g" deploy/sudoers-christmas-runner > /tmp/christmas-runner.sudoers
-visudo -cf /tmp/christmas-runner.sudoers && install -m 440 /tmp/christmas-runner.sudoers /etc/sudoers.d/christmas-runner
-sudo -iu "$SITE_USER" sudo -n /usr/bin/systemctl restart christmas-runner && echo "sudo rule OK"
-```
-
-Open `https://DOMAIN` on your phone. The game should load.
-
-### 1.6 Optional: let Nginx serve the static files
-
-Phones load the 3D models and textures faster when Nginx serves them directly. In CloudPanel →
-Sites → `DOMAIN` → **Vhost**, paste the blocks from `deploy/nginx-static.conf` inside the
-`server { … }` that listens on 443, above the existing `location / { … }` block. Replace
-`SITE_USER` / `DOMAIN` and save. CloudPanel validates and reloads Nginx.
-
-### 1.7 Connect GitHub Actions
-
-1. **A key for GitHub Actions to log in with (site user):**
-
-   ```bash
-   ssh-keygen -t ed25519 -f ~/.ssh/gh_actions -N "" -C "github-actions deploy"
-   cat ~/.ssh/gh_actions.pub >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
-   cat ~/.ssh/gh_actions        # private key, goes into the SSH_PRIVATE_KEY secret
-   ```
-
-   CloudPanel's firewall must allow SSH (port 22 by default) from the internet, since GitHub's
-   runners have changing IPs.
-
-2. **The server's host key (from your own computer):**
-
-   ```bash
-   ssh-keyscan -p 22 SERVER_IP     # goes into the SSH_KNOWN_HOSTS secret
-   ```
-
-3. GitHub → repo → **Settings → Environments → New environment** named `cloudpanel-test`,
-   then add:
-
-   | Type | Name | Value |
-   | --- | --- | --- |
-   | Secret | `SSH_HOST` | `SERVER_IP` (or a hostname) |
-   | Secret | `SSH_PORT` | `22` (optional; defaults to 22) |
-   | Secret | `SSH_USER` | `SITE_USER` |
-   | Secret | `SSH_PRIVATE_KEY` | contents of `~/.ssh/gh_actions` |
-   | Secret | `SSH_KNOWN_HOSTS` | output of `ssh-keyscan` above |
-   | Secret | `APP_DIR` | `/home/SITE_USER/htdocs/DOMAIN` |
-   | Variable | `APP_URL` | `https://DOMAIN` |
-
-   Optionally add yourself under **Required reviewers** so each deploy waits for your approval.
-
-4. Make `main` the default branch (Settings → General → Default branch).
+In CloudPanel open the site → **SSH/FTP** → under **SSH Users**, edit `SITE_USER`, or click
+**Add User** if you prefer a separate deploy user for this site. Paste the whole content of
+`christmas-runner-deploy.pub` into **SSH Keys** and save.
 
 ---
 
-## 2. Everyday use
+## Part 2: GitHub (website)
+
+### 5. Make `main` the default branch
+Repo → **Settings → General → Default branch** → `main`.
+
+### 6. Add the deployment settings
+Repo → **Settings → Environments → New environment** → name it **`cloudpanel-test`**.
+Optionally tick **Required reviewers** and add yourself, so each deploy waits for your click.
+
+Under **Environment secrets → Add secret**:
+
+| Secret | Value |
+| --- | --- |
+| `SSH_HOST` | `SERVER_IP` (or a hostname that points to it) |
+| `SSH_USER` | `SITE_USER` (or the SSH user from step 4) |
+| `SSH_PRIVATE_KEY` | the whole content of `christmas-runner-deploy`, including the `-----BEGIN…` / `-----END…` lines |
+| `APP_DIR` | `/home/SITE_USER/htdocs/DOMAIN` |
+| `SECRET_KEY` | any long random text, e.g. 50+ random letters and digits. Keeps players signed in. |
+| `SSH_PORT` | *(optional)* only if SSH isn't on port 22 |
+| `SSH_KNOWN_HOSTS` | *(optional, recommended)* the server's SSH fingerprint. Get it on your computer with `ssh-keyscan SERVER_IP`. Without it, the workflow trusts whatever key the server shows and logs a warning. |
+
+Under **Environment variables → Add variable**:
+
+| Variable | Value |
+| --- | --- |
+| `APP_URL` | `https://DOMAIN` (the workflow checks this after each deploy) |
+| `APP_PORT` | *(optional)* only if you used an App Port other than `8090` |
+| `COOKIE_SECURE` | *(optional)* set to `0` only while testing without HTTPS |
+
+### 7. First deploy
+Repo → **Actions → Deploy to CloudPanel → Run workflow** (branch `main`). After this, every push or
+merge to `main` deploys by itself. The run shows each step, and the environment link opens the site.
+
+---
+
+## Part 3: back in CloudPanel
+
+### 8. Keep the game running (cron job)
+Open the site → **Cron Jobs → Add Cron Job**:
+
+| Field | Value |
+| --- | --- |
+| Schedule | every minute: `*` `*` `*` `*` `*` |
+| Command | `bash /home/SITE_USER/htdocs/DOMAIN/current/deploy/run.sh ensure` |
+
+Every minute this checks the game answers and starts it if not, for example after a server reboot or
+a crash. When everything is fine it does nothing.
+
+### 9. Open it on your phone
+Visit `https://DOMAIN`. On the phone you can use **Add to Home Screen** for a full-screen, app-like game.
+
+### Optional: faster loading on phones
+Open the site → **Vhost**. Paste the blocks from [`deploy/nginx-static.conf`](deploy/nginx-static.conf)
+inside the `server { … }` block that has `listen 443`, **above** the existing `location / {` block.
+Replace `SITE_USER` and `DOMAIN`, then **Save**. Nginx then serves the 3D models and textures
+directly, compressed and cached.
+
+### Optional: your logo on the cap
+Open the site → **File Manager** → go to `htdocs/DOMAIN/shared/brand/` → **Upload** your logo named
+**`scan-logo.png`** (transparent PNG). It's applied on the next deploy. To apply it now,
+re-run the last deploy in GitHub Actions.
+
+---
+
+## Everyday use
 
 | You want to… | Do this |
 | --- | --- |
-| Deploy | Merge or push to `main`. Watch **Actions → Deploy to CloudPanel**. |
-| Re-deploy without changes | Actions → Deploy to CloudPanel → **Run workflow**. |
-| Deploy by hand | `sudo -iu SITE_USER` → `cd ~/htdocs/DOMAIN && bash deploy/deploy.sh` |
-| See logs | `journalctl -u christmas-runner -f` (root) |
-| Restart | `sudo systemctl restart christmas-runner` |
-| Roll back | `cd ~/htdocs/DOMAIN && git reset --hard <old-commit> && sudo systemctl restart christmas-runner`, then revert the bad commit on `main` so the next deploy doesn't bring it back |
+| Deploy | Merge or push to `main`. |
+| Deploy again without changes | GitHub → Actions → Deploy to CloudPanel → **Run workflow**. |
+| Go back to an older version | GitHub → Actions → open an older successful deploy run → **Re-run all jobs**. |
+| See the game's log | File Manager → `htdocs/DOMAIN/shared/logs/app.log` |
+| Back up scores and accounts | File Manager → `htdocs/DOMAIN/shared/data/runner.db` → **Download** |
+| Change the secret key or port | Edit the secret / variable in GitHub, then re-run the deploy. |
 
-### What the workflows do
+### What's in the site folder
 
-- **`.github/workflows/ci.yml`** runs on every push (except `main`) and every pull request:
-  API tests (`pytest`), a syntax check of every JavaScript module, and `shellcheck` on the deploy script.
-- **`.github/workflows/deploy.yml`** runs on pushes to `main` and on demand. It runs the same checks,
-  then SSHes in as `SITE_USER`, runs `deploy/deploy.sh`, and finally checks `APP_URL/api/health`.
-  Deploys never overlap.
+```
+htdocs/DOMAIN/
+├── current -> releases/<version>   the version being served
+├── releases/                       the last 3 versions (older ones are removed)
+└── shared/                         kept across deploys
+    ├── app.env                     settings written by the deploy (from your GitHub secrets)
+    ├── venv/                       Python packages
+    ├── data/runner.db              accounts and scores
+    ├── brand/                      your logo
+    └── logs/app.log                game server log
+```
 
-`deploy/deploy.sh` resets the code to `origin/main`, installs dependencies into `.venv`, restarts the
-service and waits for `/api/health`. If the app doesn't come up, it prints the service status and the
-exact rollback command, and the workflow fails.
-
-### Data and files that survive deploys
-
-- **Database**: `DB_PATH` (default `~/data/runner.db`) lives outside the code folder, so deploys never
-  touch it. Back it up with:
-
-  ```bash
-  sqlite3 ~/data/runner.db ".backup '$HOME/data/runner-$(date +%F).db'"
-  ```
-
-  (`apt install sqlite3` if needed.) A CloudPanel cron job can run this daily.
-- **Brand logo**: copy it to `~/htdocs/DOMAIN/public/assets/brand/scan-logo.png`. Untracked files are
-  kept by `git reset --hard`, so it stays across deploys.
-- **Settings**: `~/.config/christmas-runner.env`. Edit it, then restart the service.
+### How the pieces fit
+- **`.github/workflows/ci.yml`** runs on every push and pull request: API tests, a JavaScript syntax
+  check, and a check of the deploy scripts.
+- **`.github/workflows/deploy.yml`** runs on pushes to `main` and when you press **Run workflow**.
+  It runs the same checks, uploads the code to `releases/<version>`, writes `shared/app.env`, and runs
+  `deploy/activate.sh`.
+- **`deploy/activate.sh`** prepares Python, installs packages and copies your logo into the release.
+  It switches `current` and restarts the game. If the game doesn't answer within 20 seconds, it
+  switches back to the previous version and the workflow fails.
+- **`deploy/run.sh`** starts, stops and checks the game (`start`, `stop`, `restart`, `ensure`, `status`).
+  It runs as the site user. No root, sudo or systemd is needed.
 
 ---
 
-## 3. Troubleshooting
+## Troubleshooting
 
-| Symptom | Likely cause / fix |
+| Symptom | What to check |
 | --- | --- |
-| **502 Bad Gateway** | The service isn't running or the port differs from CloudPanel's App Port. Check `systemctl status christmas-runner` and that `PORT` in the env file matches the App Port. |
-| Deploy fails at `sudo -n … restart` with "a password is required" | The sudoers rule isn't installed, or `systemctl` lives at a different path; check `command -v systemctl` and fix the path in `/etc/sudoers.d/christmas-runner`. |
-| Deploy fails at SSH with "Host key verification failed" | `SSH_KNOWN_HOSTS` is missing or stale. Re-run `ssh-keyscan` and update the secret. |
-| Deploy fails with "Permission denied (publickey)" | The public key isn't in `SITE_USER`'s `~/.ssh/authorized_keys`, or `SSH_USER` is wrong. |
-| `git fetch` fails on the server | For a private repo, check the deploy key (section 1.4). |
-| Sign-in works but you're logged out immediately | `COOKIE_SECURE=1` without HTTPS. Install the certificate or set it to `0` for plain HTTP testing. |
-| Everyone is logged out after each deploy | `SECRET_KEY` is empty, so a random key is used per start. Set it in the env file. |
-| Game stuck on the loading bar | Open the browser console. If you added the Nginx static block, check the `root` path points at `…/htdocs/DOMAIN/public`. |
-| Slow on phones | Add the Nginx static block (gzip + caching). The game also drops effects automatically on slow devices. `?lowfx` forces low effects. |
-
-Useful checks on the server:
-
-```bash
-curl -s http://127.0.0.1:8090/api/health            # app itself
-curl -sI https://DOMAIN/ | head -1                   # through Nginx
-journalctl -u christmas-runner --since "10 min ago"  # recent logs
-```
+| Deploy fails at **Configure SSH** with "Missing secret …" | The named secret isn't in the `cloudpanel-test` environment. Check the spelling, and that it's an *environment* secret. |
+| **Permission denied (publickey)** | The public key isn't saved on the SSH user in CloudPanel (step 4), `SSH_USER` doesn't match that user, or the private key secret is incomplete (it must include the BEGIN/END lines). |
+| **Host key verification failed** | `SSH_KNOWN_HOSTS` is outdated. Run `ssh-keyscan SERVER_IP` again and update it, or delete the secret. |
+| **Activate release** fails with "new release failed its health check" | The game didn't start. The previous version is still running. The error and the last log lines are in the step output and in `shared/logs/app.log`. |
+| "python3 -m venv unavailable, using uv" in the log | Normal on some servers. The script installs `uv` for the site user and continues. |
+| **502 Bad Gateway** in the browser | The game isn't running, or CloudPanel's App Port differs from `APP_PORT` (default 8090). Check the cron job (step 8) and the port in the site's **Settings**. |
+| **Check the public site** fails but **Activate** passed | DNS or SSL isn't ready yet, or the App Port mismatch above. |
+| Signed out right after signing in | You're on `http://` while `COOKIE_SECURE` is on. Use `https://`, or set the variable `COOKIE_SECURE=0` for testing. |
+| Everyone signed out after each deploy | `SECRET_KEY` secret is missing. Add it and re-deploy. |
+| Game stuck on the loading bar | If you added the Vhost snippet, check its paths point to `…/htdocs/DOMAIN/current/public`. |

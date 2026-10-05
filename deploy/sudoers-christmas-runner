@@ -1,5 +1,0 @@
-# Lets the CloudPanel site user restart the game service (and nothing else) without a password.
-# Install as root with:  visudo -cf deploy/sudoers-christmas-runner && \
-#   install -m 440 deploy/sudoers-christmas-runner /etc/sudoers.d/christmas-runner
-# Replace SITE_USER first.
-SITE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart christmas-runner, /usr/bin/systemctl status christmas-runner, /usr/bin/systemctl status christmas-runner *

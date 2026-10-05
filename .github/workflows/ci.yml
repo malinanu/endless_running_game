@@ -37,5 +37,5 @@ jobs:
             node --check --input-type=module < "$f" || { echo "::error file=$f::syntax error"; exit 1; }
           done
 
-      - name: Check deploy script
-        run: shellcheck deploy/deploy.sh
+      - name: Check deploy scripts
+        run: shellcheck deploy/*.sh

@@ -24,29 +24,72 @@ jobs:
     environment:
       name: cloudpanel-test
       url: ${{ vars.APP_URL }}
+    env:
+      APP_DIR: ${{ secrets.APP_DIR }}
     steps:
-      - name: Configure SSH
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
-        run: |
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          chmod 644 ~/.ssh/known_hosts
+      - uses: actions/checkout@v5
 
-      - name: Run deploy script on the server
+      - name: Configure SSH
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
           SSH_USER: ${{ secrets.SSH_USER }}
-          APP_DIR: ${{ secrets.APP_DIR }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
         run: |
-          ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" \
-            -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=20 \
-            "$SSH_USER@$SSH_HOST" \
-            "cd '$APP_DIR' && git fetch --quiet origin main && git checkout --quiet -f origin/main -- deploy/deploy.sh && bash deploy/deploy.sh main"
+          for v in SSH_HOST SSH_USER SSH_PRIVATE_KEY APP_DIR; do
+            [ -n "${!v}" ] || { echo "::error::Missing secret $v in the cloudpanel-test environment (see DEPLOYMENT.md)"; exit 1; }
+          done
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          if [ -n "$SSH_KNOWN_HOSTS" ]; then
+            printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            echo "::warning::SSH_KNOWN_HOSTS is not set; trusting the host key the server presents now."
+            ssh-keyscan -p "$SSH_PORT" "$SSH_HOST" > ~/.ssh/known_hosts 2>/dev/null
+          fi
+          cat > ~/.ssh/config <<CONFIG
+          Host server
+            HostName $SSH_HOST
+            Port $SSH_PORT
+            User $SSH_USER
+            IdentityFile ~/.ssh/deploy_key
+            IdentitiesOnly yes
+            BatchMode yes
+            StrictHostKeyChecking yes
+            ConnectTimeout 20
+            ServerAliveInterval 15
+          CONFIG
+          ssh server true && echo "SSH OK"
+
+      - name: Upload release
+        run: |
+          REL="releases/${GITHUB_SHA::12}"
+          echo "REL=$REL" >> "$GITHUB_ENV"
+          # shellcheck disable=SC2029  # paths are meant to expand here, on the runner
+          git archive --format=tar HEAD | ssh server \
+            "set -e; cd '$APP_DIR'; mkdir -p shared releases; rm -rf '$REL'; mkdir -p '$REL'; tar -xf - -C '$REL'"
+
+      - name: Write settings
+        env:
+          SECRET_KEY: ${{ secrets.SECRET_KEY }}
+          APP_PORT: ${{ vars.APP_PORT || '8090' }}
+          COOKIE_SECURE: ${{ vars.COOKIE_SECURE || '1' }}
+        run: |
+          [ -n "$SECRET_KEY" ] || echo "::warning::SECRET_KEY is not set; players will be signed out on every restart."
+          # shellcheck disable=SC2029
+          {
+            printf 'PORT=%q\n' "$APP_PORT"
+            printf 'SECRET_KEY=%q\n' "$SECRET_KEY"
+            printf 'DB_PATH=%q\n' "$APP_DIR/shared/data/runner.db"
+            printf 'COOKIE_SECURE=%q\n' "$COOKIE_SECURE"
+          } | ssh server "umask 077; cat > '$APP_DIR/shared/app.env'"
+
+      - name: Activate release
+        run: |
+          # shellcheck disable=SC2029
+          ssh server "bash '$APP_DIR/$REL/deploy/activate.sh'"
 
       - name: Check the public site
         if: vars.APP_URL != ''
@@ -57,7 +100,7 @@ jobs:
             if curl -fsS "${APP_URL%/}/api/health"; then echo; exit 0; fi
             sleep 3
           done
-          echo "::error::${APP_URL%/}/api/health is not answering"
+          echo "::error::${APP_URL%/}/api/health is not answering (check the CloudPanel App Port matches APP_PORT)"
           exit 1
 
       - name: Remove SSH key
